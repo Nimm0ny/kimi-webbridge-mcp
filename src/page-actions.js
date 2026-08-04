@@ -46,13 +46,26 @@ export function sleep(ms) {
 
 // ── Snapshot search ───────────────────────────────────────────
 
+/**
+ * Walk a11y trees that may contain nested bare arrays (Bilibili/WebBridge quirks),
+ * not only { children: [] } nodes.
+ */
 export function walkSnapshot(nodes, visit) {
-  if (!nodes) return;
-  const list = Array.isArray(nodes) ? nodes : [nodes];
-  for (const node of list) {
-    if (!node || typeof node !== "object") continue;
-    visit(node);
-    if (node.children?.length) walkSnapshot(node.children, visit);
+  if (nodes == null) return;
+  if (Array.isArray(nodes)) {
+    for (const item of nodes) walkSnapshot(item, visit);
+    return;
+  }
+  if (typeof nodes !== "object") return;
+  // Skip plain arrays already handled; visit real a11y nodes
+  if (nodes.role != null || nodes.name != null || nodes.ref != null) {
+    visit(nodes);
+  }
+  if (nodes.children != null) walkSnapshot(nodes.children, visit);
+  // Some dumps nest extra array-valued fields
+  for (const [k, v] of Object.entries(nodes)) {
+    if (k === "children" || k === "name" || k === "role" || k === "ref") continue;
+    if (Array.isArray(v)) walkSnapshot(v, visit);
   }
 }
 
@@ -66,8 +79,10 @@ export function searchSnapshot(tree, { query, role, limit = 20 }) {
     const name = String(node.name ?? "");
     const nodeRole = String(node.role ?? "");
     const ref = node.ref || null;
+    if (!name && !ref && !nodeRole) return;
     if (roleFilter && nodeRole.toLowerCase() !== roleFilter) return;
     if (q) {
+      // Case-fold for ASCII; Chinese matched as-is via includes on lowercased hay (中文 unchanged)
       const hay = `${name} ${nodeRole} ${ref || ""}`.toLowerCase();
       if (!hay.includes(q)) return;
     }
@@ -261,31 +276,71 @@ export async function scroll(client, { selector, direction, amount, x, y }, sess
     return assertOk(await evaluateJson(client, code, session), "scroll");
   }
 
+  // SPA sites (Bilibili etc.) often scroll overflow containers, not window
   const code = `(() => {
     const sel = ${JSON.stringify(selector || null)};
     const direction = ${JSON.stringify(direction || null)};
     const amount = ${Number(amount ?? 600)};
     const x = ${x == null ? "null" : Number(x)};
     const y = ${y == null ? "null" : Number(y)};
+    function scrollableRoot() {
+      const cands = [
+        document.scrollingElement,
+        document.documentElement,
+        document.body,
+        document.querySelector('#app'),
+        document.querySelector('.app'),
+        document.querySelector('main'),
+        ...document.querySelectorAll('div'),
+      ].filter(Boolean);
+      let best = document.scrollingElement || document.documentElement;
+      let bestScore = 0;
+      for (const el of cands.slice(0, 80)) {
+        try {
+          const st = getComputedStyle(el);
+          const oy = st.overflowY;
+          const canY = (oy === 'auto' || oy === 'scroll' || el === document.scrollingElement || el === document.documentElement);
+          const delta = el.scrollHeight - el.clientHeight;
+          if (canY && delta > bestScore) { best = el; bestScore = delta; }
+        } catch (_) {}
+      }
+      return best;
+    }
     if (sel) {
       const el = document.querySelector(sel);
       if (!el) return JSON.stringify({ ok: false, error: "element not found: " + sel });
       el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
       return JSON.stringify({ ok: true, mode: "intoView", selector: sel });
     }
+    const root = scrollableRoot();
+    const before = root.scrollTop || window.scrollY || 0;
     if (x != null || y != null) {
-      window.scrollBy(x || 0, y || 0);
-      return JSON.stringify({ ok: true, mode: "by", x: x || 0, y: y || 0, scrollY: window.scrollY });
+      if (root === document.scrollingElement || root === document.documentElement || root === document.body) {
+        window.scrollBy(x || 0, y || 0);
+      } else {
+        root.scrollTop = (root.scrollTop || 0) + (y || 0);
+        root.scrollLeft = (root.scrollLeft || 0) + (x || 0);
+      }
+      return JSON.stringify({ ok: true, mode: "by", x: x || 0, y: y || 0, scrollTop: root.scrollTop, scrollY: window.scrollY, root: root.tagName + (root.id ? '#'+root.id : '') });
     }
     const map = { up: [0, -amount], down: [0, amount], left: [-amount, 0], right: [amount, 0] };
     const delta = map[direction] || [0, amount];
-    window.scrollBy(delta[0], delta[1]);
+    if (root === document.scrollingElement || root === document.documentElement || root === document.body) {
+      window.scrollBy(delta[0], delta[1]);
+    } else {
+      root.scrollTop = (root.scrollTop || 0) + delta[1];
+      root.scrollLeft = (root.scrollLeft || 0) + delta[0];
+    }
+    const after = root.scrollTop || window.scrollY || 0;
     return JSON.stringify({
       ok: true,
       mode: "direction",
       direction: direction || "down",
       amount,
-      scrollY: window.scrollY,
+      scrollTopBefore: before,
+      scrollTopAfter: after,
+      moved: after !== before,
+      root: root.tagName + (root.id ? '#' + root.id : '') + (root.className ? '.' + String(root.className).split(/\\s+/).slice(0,2).join('.') : ''),
     });
   })()`;
   return assertOk(await evaluateJson(client, code, session), "scroll");

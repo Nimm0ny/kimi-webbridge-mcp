@@ -21,16 +21,23 @@ function scoreTab(tab, want) {
   const na = normalizeUrl(tab.url);
   const nb = normalizeUrl(want);
   if (na === nb) return 100;
-  if (na.startsWith(nb) || nb.startsWith(na)) return 90;
   try {
     const t = new URL(tab.url);
     const w = new URL(want.startsWith("http") ? want : `https://${want}`);
-    if (t.hostname.replace(/^www\./, "") === w.hostname.replace(/^www\./, "")) {
-      if (t.pathname.replace(/\/$/, "") === w.pathname.replace(/\/$/, "")) return 95;
-      return 70;
-    }
+    const th = t.hostname.replace(/^www\./, "");
+    const wh = w.hostname.replace(/^www\./, "");
+    if (th !== wh) return -1;
+    const tp = t.pathname.replace(/\/$/, "") || "/";
+    const wp = w.pathname.replace(/\/$/, "") || "/";
+    if (tp === wp) return 95;
+    // Path prefix only when the longer path extends the shorter (video id etc.)
+    if (tp.startsWith(wp + "/") || wp.startsWith(tp + "/")) return 88;
+    // Same host but different path: do NOT treat as match (Bilibili home vs /video/BV...)
+    if (wp !== "/" && tp !== wp) return -1;
+    // want is bare host or /
+    if (wp === "/" || wp === "") return 60;
   } catch {
-    if (String(tab.url).includes(want) || want.includes(String(tab.url))) return 40;
+    if (na.startsWith(nb) || nb.startsWith(na)) return 80;
   }
   return -1;
 }
