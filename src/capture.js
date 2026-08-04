@@ -21,6 +21,7 @@ export async function screenshotSmart(client, opts = {}, session) {
 
   // Prefer jpeg — png full-page is the main timeout culprit
   let format = fmtIn || "jpeg";
+  // Keep in sync with wb_screenshot schema description (default 55)
   let quality = qualityIn ?? (format === "jpeg" ? 55 : undefined);
 
   let page = null;

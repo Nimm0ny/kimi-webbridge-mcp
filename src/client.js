@@ -253,11 +253,7 @@ export function packageVersion() {
   return PKG_VERSION;
 }
 
-export function expectedToolCount() {
-  // Lazy import-free: compact default 20, full 28
-  const p = String(process.env.WEBBRIDGE_TOOL_PROFILE || "compact").toLowerCase();
-  return p === "full" || p === "all" ? 28 : 20;
-}
+export { expectedToolCount, getProfile, profileInfo } from "./tool-profile.js";
 
 export function readIdentity() {
   const home = process.env.USERPROFILE || process.env.HOME || homedir();

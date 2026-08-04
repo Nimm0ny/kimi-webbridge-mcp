@@ -72,11 +72,10 @@ export async function findTabSmart(client, { url, active, session } = {}) {
       const msg = errText(err);
       const tabs = await listSessionTabs(client, session);
 
-      // Prefer true active tab, else single tab, else first
+      // Prefer true active tab; only fall back to single-tab session (never silent tabs[0] among many)
       const pick =
         tabs.find((t) => t.active) ||
-        (tabs.length === 1 ? tabs[0] : null) ||
-        tabs[0];
+        (tabs.length === 1 ? tabs[0] : null);
 
       if (pick?.url) {
         try {
@@ -107,8 +106,14 @@ export async function findTabSmart(client, { url, active, session } = {}) {
 
       throw new ToolError("Cannot resolve active tab", {
         code: "find_tab_active_failed",
-        detail: { daemon: msg, sessionTabs: tabs },
-        hint: "Open a page with wb_navigate in this session first, or pass url. Extension may require url alongside active:true.",
+        detail: {
+          daemon: msg,
+          sessionTabs: tabs.map((t) => ({ url: t.url, title: t.title, active: t.active })),
+        },
+        hint:
+          tabs.length > 1
+            ? "Multiple session tabs and none marked active — pass url from wb_list_tabs."
+            : "Open a page with wb_navigate in this session first, or pass url. Extension may require url alongside active:true.",
       });
     }
   }

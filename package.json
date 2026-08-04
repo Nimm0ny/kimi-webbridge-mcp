@@ -1,6 +1,6 @@
 {
   "name": "kimi-webbridge-mcp",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Compact MCP + thin Skill for Kimi WebBridge (Claude-in-Chrome sized tool surface)",
   "type": "module",
   "private": false,

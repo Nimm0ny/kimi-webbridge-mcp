@@ -4,10 +4,13 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { expectedToolCount, getProfile } from "./tool-profile.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json");
 const root = dirname(fileURLToPath(import.meta.url));
+const profile = getProfile();
+const expected = expectedToolCount();
 
 const t = new StdioClientTransport({
   command: "node",
@@ -18,8 +21,6 @@ const c = new Client({ name: "smoke-list", version: "1.0.0" });
 await c.connect(t);
 const tools = await c.listTools();
 const names = tools.tools.map((x) => x.name).sort();
-const profile = String(process.env.WEBBRIDGE_TOOL_PROFILE || "compact").toLowerCase();
-const expected = profile === "full" || profile === "all" ? 28 : 20;
 console.log("package", pkg.version);
 console.log("profile", profile);
 console.log("tool_count", names.length, "expected", expected);

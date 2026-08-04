@@ -396,7 +396,18 @@ export async function scroll(client, { selector, direction, amount, x, y }, sess
 
 // ── Click with optional new-tab follow ────────────────────────
 
+function sameSite(a, b) {
+  try {
+    const ha = new URL(a).hostname.replace(/^www\./, "");
+    const hb = new URL(b).hostname.replace(/^www\./, "");
+    return ha === hb;
+  } catch {
+    return false;
+  }
+}
+
 export async function clickSmart(client, selector, session, { followNewTab = true } = {}) {
+  const { allowBorrowActiveTab } = await import("./tool-profile.js");
   let beforeIds = new Set();
   let beforeById = new Map();
   let beforeHref = null;
@@ -428,13 +439,16 @@ export async function clickSmart(client, selector, session, { followNewTab = tru
     return { ok: true, click: clickResult, followedNewTab: false };
   }
 
-  // Bilibili etc. may open tabs slightly async
-  for (const waitMs of [400, 700, 1000]) {
-    await sleep(waitMs);
+  // Fast path then short backoff (avoid fixed ~2s when nothing changed)
+  const waits = [150, 250, 400, 700];
+  let sawGrowth = false;
+  for (let i = 0; i < waits.length; i++) {
+    await sleep(waits[i]);
     try {
       const listed = unwrap(await client.command("list_tabs", {}, { session }));
       const afterTabs = listed?.tabs || listed?.data?.tabs || [];
       const created = afterTabs.filter((t) => t.tabId != null && !beforeIds.has(t.tabId));
+      if (created.length) sawGrowth = true;
       const httpCreated = created.filter((t) => /^https?:/i.test(t.url || ""));
       const target = httpCreated[httpCreated.length - 1] || created[created.length - 1];
       if (target?.url && !/^about:|chrome:|edge:/i.test(target.url)) {
@@ -448,7 +462,7 @@ export async function clickSmart(client, selector, session, { followNewTab = tru
           findTab: switched,
         };
       }
-      // Same tabId but URL navigated (SPA or full navigation)
+      // Same tabId but URL navigated
       for (const t of afterTabs) {
         const prev = beforeById.get(t.tabId);
         if (prev && t.url && t.url !== prev && /^https?:/i.test(t.url)) {
@@ -477,8 +491,12 @@ export async function clickSmart(client, selector, session, { followNewTab = tru
           url: now.href,
         };
       }
+      // Early exit if session tab set stable and URL unchanged after first couple polls
+      if (!sawGrowth && i >= 1 && beforeHref && now?.href === beforeHref) {
+        break;
+      }
     } catch (err) {
-      if (waitMs >= 1000) {
+      if (i === waits.length - 1) {
         return {
           ok: true,
           click: clickResult,
@@ -490,30 +508,41 @@ export async function clickSmart(client, selector, session, { followNewTab = tru
     }
   }
 
-  // New tab may be outside session group (Bilibili often does this) — borrow browser active tab
-  try {
-    const { findTabSmart } = await import("./tab-actions.js");
-    const borrowed = await findTabSmart(client, { active: true, session });
-    const url =
-      borrowed?.data?.url ||
-      borrowed?.url ||
-      borrowed?.resolvedUrl ||
-      null;
-    if (url && beforeHref && url.split("?")[0] !== beforeHref.split("?")[0]) {
-      return {
-        ok: true,
-        click: clickResult,
-        followedNewTab: true,
-        borrowedActive: true,
-        url,
-        findTab: borrowed,
-      };
+  // Optional borrow of browser active tab (OFF by default — can steal focus from user tabs).
+  // Enable with WEBBRIDGE_CLICK_BORROW_ACTIVE=1 for sites that open tabs outside the session group.
+  if (allowBorrowActiveTab() && beforeHref) {
+    try {
+      const { findTabSmart } = await import("./tab-actions.js");
+      const borrowed = await findTabSmart(client, { active: true, session });
+      const url =
+        borrowed?.data?.url ||
+        borrowed?.url ||
+        borrowed?._meta?.resolvedUrl ||
+        null;
+      // Only if same-site as the page we clicked on (reduces accidental cross-site jumps)
+      if (url && sameSite(url, beforeHref) && url.split("?")[0] !== beforeHref.split("?")[0]) {
+        return {
+          ok: true,
+          click: clickResult,
+          followedNewTab: true,
+          borrowedActive: true,
+          url,
+          findTab: borrowed,
+        };
+      }
+    } catch {
+      /* ignore */
     }
-  } catch {
-    /* ignore */
   }
 
-  return { ok: true, click: clickResult, followedNewTab: false };
+  return {
+    ok: true,
+    click: clickResult,
+    followedNewTab: false,
+    hint: sawGrowth
+      ? "Session gained a tab but switch failed; wb_list_tabs then wb_find_tab with full URL."
+      : "No session tab change detected. If the site opened a tab outside the agent group, set WEBBRIDGE_CLICK_BORROW_ACTIVE=1 or navigate by URL.",
+  };
 }
 
 // ── Wait ──────────────────────────────────────────────────────
@@ -887,13 +916,13 @@ export async function fillForm(client, fields, session) {
   }
   const failed = results.filter((r) => !r.ok);
   if (failed.length) {
-    throw new Error(
-      JSON.stringify({
-        ok: false,
-        filled: results.length - failed.length,
-        total: results.length,
-        results,
-      }),
+    throw new ToolError(
+      `wb_fill_form: ${failed.length}/${results.length} fields failed`,
+      {
+        code: "fill_form_partial",
+        detail: { filled: results.length - failed.length, total: results.length, results },
+        hint: "Re-snapshot for @e refs; fill failed fields individually with wb_fill; check Vue/controlled inputs.",
+      },
     );
   }
   return {

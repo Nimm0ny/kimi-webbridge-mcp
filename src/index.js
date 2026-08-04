@@ -213,7 +213,10 @@ tool(
   },
   async ({ query, role, limit, session }) => {
     if (!query && !role) {
-      throw new Error("Provide query and/or role");
+      throw new ToolError("wb_find needs query and/or role", {
+        code: "find_args",
+        hint: 'Example: { query: "登录" } or { role: "link", query: "动态" }.',
+      });
     }
     const snap = unwrap(await client.command("snapshot", {}, { session }));
     const tree = snap?.tree ?? snap;
@@ -370,7 +373,7 @@ tool(
   "Screenshot current tab (or selector). Default format=jpeg for reliability; auto-retries smaller jpeg on timeout. Returns path; embeds image when under size cap. Errors include problem+hint.",
   {
     format: z.enum(["png", "jpeg"]).optional().describe("Default jpeg (faster/more reliable than png)"),
-    quality: z.number().int().min(0).max(100).optional().describe("JPEG quality; default 65"),
+    quality: z.number().int().min(0).max(100).optional().describe("JPEG quality; default 55"),
     selector: z.string().optional().describe("Optional @e/CSS crop — use for large pages"),
     path: z.string().optional(),
     session: sessionOpt,

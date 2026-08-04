@@ -1,5 +1,6 @@
 /**
  * Stress every wb_* tool against real browser (Edge extension + cookies).
+ * Uses full profile so extras (hover/cdp/pdf/…) are registered.
  * Run: node src/stress-all.mjs
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -8,14 +9,20 @@ import { writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { expectedToolCount } from "./tool-profile.js";
+
+// Force full surface for this harness (parent env for expectedToolCount too)
+process.env.WEBBRIDGE_TOOL_PROFILE = "full";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const SESSION = `stress-${Date.now().toString(36)}`;
 const results = [];
+const EXPECTED = expectedToolCount();
 
 const t = new StdioClientTransport({
   command: "node",
   args: [join(root, "index.js")],
+  env: { ...process.env, WEBBRIDGE_TOOL_PROFILE: "full" },
 });
 const c = new Client({ name: "stress-all", version: "1.0.0" });
 await c.connect(t);
@@ -233,7 +240,7 @@ const missing = ALL.filter((t) => !toolsHit.has(t));
 
 console.log("\n========== SUMMARY ==========");
 console.log(`calls: ${results.length}  pass: ${pass}  fail: ${fail}`);
-console.log(`unique tools: ${toolsHit.size}/28`);
+console.log(`unique tools: ${toolsHit.size}/${EXPECTED} (profile=full)`);
 if (missing.length) console.log("MISSING:", missing.join(", "));
 console.log("\nFailures:");
 for (const r of results.filter((x) => !x.ok)) {
