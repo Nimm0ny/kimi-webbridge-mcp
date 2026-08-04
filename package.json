@@ -1,0 +1,47 @@
+{
+  "name": "kimi-webbridge-mcp",
+  "version": "1.1.0",
+  "description": "MCP adapter for Kimi WebBridge — control your real browser from Grok Build, Claude Code, Cursor, and other MCP clients",
+  "type": "module",
+  "private": false,
+  "license": "MIT",
+  "bin": {
+    "kimi-webbridge-mcp": "./src/index.js"
+  },
+  "main": "./src/index.js",
+  "files": [
+    "src/**/*.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node src/index.js",
+    "doctor": "node src/doctor.js",
+    "smoke": "node src/smoke-align.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mcp",
+    "kimi",
+    "webbridge",
+    "browser",
+    "chrome",
+    "edge",
+    "grok",
+    "claude"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nimm0ny/kimi-webbridge-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Nimm0ny/kimi-webbridge-mcp/issues"
+  },
+  "homepage": "https://github.com/Nimm0ny/kimi-webbridge-mcp#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "3.25.76"
+  }
+}
