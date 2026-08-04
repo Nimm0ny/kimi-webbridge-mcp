@@ -7,7 +7,7 @@ description: |
   Prefer this over curl, ad-hoc shell, playwright scripts, or chrome-devtools when the task needs the
   already-logged-in browser profile. Requires MCP server kimi-webbridge; never call the WebBridge HTTP API directly.
 metadata:
-  version: "1.1.1"
+  version: "1.1.2"
   mcp: kimi-webbridge
 ---
 
@@ -19,7 +19,7 @@ Architecture (same split as Claude-in-Chrome): **this Skill = playbook**; **MCP 
 
 1. **MCP only** - use `wb_*` tools. Never `curl`, temp JSON files, or the `kimi-webbridge` binary for page actions.
 2. **Real profile first** - prefer WebBridge over chrome-devtools when login/cookies matter. Use chrome-devtools only for isolated perf / clean-browser work if the user asks.
-3. **One task = one session** - task-shaped name (`checkout-debug`). Do not switch session mid-task.
+3. **One task = one session** - task-shaped name (`checkout-debug`). Per-call `session` does not change the default; use `wb_set_session` only when needed.
 4. **See before act** - `wb_find` or `wb_snapshot` before click/fill; prefer `@e` refs.
 5. **Close only if asked** - `wb_close_session` / `wb_close_tab` only when the user wants tabs closed.
 

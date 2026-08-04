@@ -8,7 +8,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { WebBridgeClient } from "./client.js";
+import { packageVersion, WebBridgeClient } from "./client.js";
 import { formatError, formatResult } from "./format.js";
 import {
   consoleCmd,
@@ -26,20 +26,21 @@ import {
   waitFor,
 } from "./page-actions.js";
 
+const VERSION = packageVersion();
 const client = new WebBridgeClient();
 
 const server = new McpServer(
   {
     name: "kimi-webbridge",
-    version: "1.1.0",
+    version: VERSION,
   },
   {
     instructions: [
       "Kimi WebBridge controls the user's REAL browser (existing logins/cookies) via a local daemon + Chrome/Edge extension.",
       "Workflow: wb_status → wb_navigate (or wb_find_tab active:true) → wb_snapshot or wb_find → wb_click/wb_fill using @e refs.",
-      "Claude-in-Chrome style helpers: wb_get_text, wb_find, wb_press_key, wb_scroll, wb_wait, wb_console, wb_go_back, wb_reload, wb_hover, wb_dblclick, wb_fill_form.",
-      "Prefer wb_snapshot/wb_find + @eN refs over CSS/JS. Use wb_evaluate/wb_cdp only as escape hatches.",
-      "Session = tab group. Default session is auto-injected; override only for parallel unrelated tasks.",
+      "Claude-in-Chrome style helpers: wb_get_text, wb_find, wb_press_key, wb_scroll, wb_wait, wb_console, wb_go_back, wb_go_forward, wb_reload, wb_hover, wb_dblclick, wb_fill_form.",
+      "Prefer wb_snapshot/wb_find + @eN refs over CSS/JS. Use wb_evaluate/wb_cdp only as escape hatches — never for stealing secrets/cookies/exporting credentials.",
+      "Session = tab group. Default session is auto-injected. Per-call session does NOT change the default (use wb_set_session for that).",
       "wb_close_session only when the user asks to close agent tabs.",
       "Not chrome-devtools-mcp: never launches an isolated browser. For performance traces use chrome-devtools MCP alongside this.",
       "If extension disconnected: enable Kimi WebBridge in the browser (edge://extensions or chrome://extensions).",
@@ -50,7 +51,7 @@ const server = new McpServer(
 function tool(name, description, shape, handler, { preferImage = false } = {}) {
   server.tool(name, description, shape, async (args) => {
     try {
-      if (args?.session) client.setSession(args.session);
+      // session is per-call only — do NOT mutate client default (avoids cross-task pollution)
       const result = await handler(args ?? {});
       return formatResult(result, { preferImage });
     } catch (err) {
@@ -59,7 +60,10 @@ function tool(name, description, shape, handler, { preferImage = false } = {}) {
   });
 }
 
-const sessionOpt = z.string().optional().describe("Override default session for this call");
+const sessionOpt = z
+  .string()
+  .optional()
+  .describe("Per-call session override (does not change default; use wb_set_session for that)");
 
 // ── Connectivity ──────────────────────────────────────────────
 
@@ -68,9 +72,11 @@ tool(
   "Check WebBridge daemon + browser extension connection. Call first if unsure whether the bridge is ready.",
   {},
   async () => {
+    client.invalidateStatusCache();
     const ensured = await client.ensureDaemon();
     return {
       ...ensured.status,
+      mcp_version: VERSION,
       daemon_started_now: ensured.started,
       default_session: client.getSession(),
       ready: Boolean(ensured.status?.running && ensured.status?.extension_connected),
@@ -249,7 +255,7 @@ tool(
 
 tool(
   "wb_dblclick",
-  "Double-click an element (@e or CSS). Implemented as two resolved clicks.",
+  "Double-click an element (@e or CSS). Dispatches real dblclick DOM events (not two separate clicks).",
   {
     selector: z.string().min(1),
     session: sessionOpt,
@@ -350,7 +356,7 @@ tool(
 
 tool(
   "wb_screenshot",
-  "Screenshot current tab (or a selector). Returns filesystem path; embeds image when possible.",
+  "Screenshot current tab (or a selector). Returns filesystem path; embeds image when under size cap (path always returned).",
   {
     format: z.enum(["png", "jpeg"]).optional(),
     quality: z.number().int().min(0).max(100).optional(),
@@ -422,10 +428,10 @@ tool(
 
 tool(
   "wb_upload",
-  "Set files on a file input element.",
+  "Set files on a file input element. files must be absolute local filesystem paths (never remote URLs).",
   {
     selector: z.string().min(1),
-    files: z.array(z.string()).min(1).describe("Absolute filesystem paths"),
+    files: z.array(z.string()).min(1).describe("Absolute local filesystem paths only"),
     session: sessionOpt,
   },
   async ({ selector, files, session }) =>
@@ -436,5 +442,5 @@ tool(
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error(
-  `[kimi-webbridge-mcp] v1.1.0 ready session=${client.getSession()} url=${process.env.WEBBRIDGE_URL || "http://127.0.0.1:10086"}`,
+  `[kimi-webbridge-mcp] v${VERSION} ready session=${client.getSession()} url=${process.env.WEBBRIDGE_URL || "http://127.0.0.1:10086"} tools=28`,
 );

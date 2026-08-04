@@ -76,7 +76,7 @@ mkdir -p ~/.grok/skills && cp -R skills/kimi-webbridge ~/.grok/skills/
 
 **核心：** `wb_status` · `wb_navigate` · `wb_snapshot` · `wb_click` · `wb_fill` · `wb_evaluate` · `wb_cdp` · `wb_screenshot` · `wb_network` · `wb_upload` · 标签管理  
 
-**便利（对齐 Claude-in-Chrome 能力面）：** `wb_get_text` · `wb_find` · `wb_press_key` · `wb_scroll` · `wb_wait` · `wb_console` · `wb_hover` · `wb_dblclick` · `wb_fill_form` · `wb_go_back` / `wb_reload`
+**便利（对齐 Claude-in-Chrome 能力面）：** `wb_get_text` · `wb_find` · `wb_press_key` · `wb_scroll` · `wb_wait` · `wb_console` · `wb_hover` · `wb_dblclick` · `wb_fill_form` · `wb_go_back` · `wb_go_forward` · `wb_reload`
 
 默认流程见 Skill；细节见 `skills/kimi-webbridge/references/workflow.md`。
 
@@ -105,9 +105,10 @@ mkdir -p ~/.grok/skills && cp -R skills/kimi-webbridge ~/.grok/skills/
 ## 开发
 
 ```bash
-npm start          # MCP stdio
-npm run doctor
-npm run smoke
+npm start            # MCP stdio
+npm run doctor       # daemon + extension + version + skill path
+npm run smoke        # list-only (28 tools, no browser)
+npm run smoke:e2e    # full browser e2e (needs extension; dev clone)
 ```
 
 ## 安全

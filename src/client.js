@@ -2,8 +2,37 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 
-const DEFAULT_BASE = process.env.WEBBRIDGE_URL?.replace(/\/$/, "") || "http://127.0.0.1:10086";
+const require = createRequire(import.meta.url);
+const PKG_VERSION = require("../package.json").version;
+
+const STATUS_CACHE_TTL_MS = Number(process.env.WEBBRIDGE_STATUS_CACHE_MS || 1500);
+
+function assertLocalBaseUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`Invalid WEBBRIDGE_URL: ${url}`);
+  }
+  const host = (parsed.hostname || "").toLowerCase();
+  const allowed = host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
+  if (!allowed) {
+    throw new Error(
+      `WEBBRIDGE_URL must point at localhost (got host "${parsed.hostname}"). ` +
+        `Only http://127.0.0.1:<port> / localhost / ::1 are allowed for safety.`,
+    );
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`WEBBRIDGE_URL must be http(s), got ${parsed.protocol}`);
+  }
+  return url.replace(/\/$/, "");
+}
+
+const DEFAULT_BASE = assertLocalBaseUrl(
+  process.env.WEBBRIDGE_URL?.replace(/\/$/, "") || "http://127.0.0.1:10086",
+);
 const DEFAULT_TIMEOUT_MS = Number(process.env.WEBBRIDGE_TIMEOUT_MS || 120_000);
 
 function daemonBinary() {
@@ -17,8 +46,11 @@ function sleep(ms) {
 }
 
 export class WebBridgeClient {
+  #statusCache = null;
+  #statusCacheAt = 0;
+
   constructor({ baseUrl = DEFAULT_BASE, timeoutMs = DEFAULT_TIMEOUT_MS, session } = {}) {
-    this.baseUrl = baseUrl;
+    this.baseUrl = assertLocalBaseUrl(baseUrl);
     this.timeoutMs = timeoutMs;
     this.session = session || process.env.WEBBRIDGE_SESSION || "grok-webbridge";
   }
@@ -34,18 +66,37 @@ export class WebBridgeClient {
     return this.session;
   }
 
-  async status() {
-    return this.#get("/status");
+  /** Resolve per-call session without mutating the default. */
+  resolveSession(session) {
+    if (session && typeof session === "string" && session.trim()) return session.trim();
+    return this.session;
+  }
+
+  invalidateStatusCache() {
+    this.#statusCache = null;
+    this.#statusCacheAt = 0;
+  }
+
+  async status({ force = false } = {}) {
+    const now = Date.now();
+    if (!force && this.#statusCache && now - this.#statusCacheAt < STATUS_CACHE_TTL_MS) {
+      return this.#statusCache;
+    }
+    const s = await this.#get("/status");
+    this.#statusCache = s;
+    this.#statusCacheAt = Date.now();
+    return s;
   }
 
   async ensureDaemon({ startIfNeeded = true } = {}) {
     try {
-      const s = await this.status();
+      const s = await this.status({ force: true });
       return { ok: true, started: false, status: s };
     } catch (err) {
       if (!startIfNeeded) throw err;
     }
 
+    this.invalidateStatusCache();
     const bin = daemonBinary();
     if (!existsSync(bin)) {
       throw new Error(
@@ -75,19 +126,27 @@ export class WebBridgeClient {
     for (let i = 0; i < 20; i++) {
       await sleep(200);
       try {
-        const s = await this.status();
+        const s = await this.status({ force: true });
         return { ok: true, started: true, status: s };
       } catch {
         // retry
       }
     }
-    throw new Error("daemon start timed out — is port 10086 blocked?");
+    throw new Error("daemon start timed out - is port 10086 blocked?");
   }
 
   async command(action, args = {}, { session, requireExtension = true } = {}) {
-    await this.ensureDaemon();
+    const ensured = await this.ensureDaemon();
     if (requireExtension) {
-      const s = await this.status();
+      // Reuse status from ensure when fresh; otherwise one cached/forced check
+      let s = ensured.status;
+      if (!s || Date.now() - this.#statusCacheAt > STATUS_CACHE_TTL_MS) {
+        s = await this.status({ force: false });
+      }
+      if (!s.extension_connected) {
+        // One forced recheck in case extension just connected
+        s = await this.status({ force: true });
+      }
       if (!s.extension_connected) {
         throw new Error(
           "WebBridge daemon is running but the browser extension is NOT connected. " +
@@ -100,7 +159,7 @@ export class WebBridgeClient {
     const body = {
       action,
       args: args ?? {},
-      session: session || this.session,
+      session: this.resolveSession(session),
     };
 
     return this.#post("/command", body);
@@ -123,6 +182,7 @@ export class WebBridgeClient {
       }
       return data;
     } catch (err) {
+      this.invalidateStatusCache();
       if (err?.name === "AbortError") throw new Error(`GET ${path} timed out`);
       if (err?.cause?.code === "ECONNREFUSED" || /fetch failed|ECONNREFUSED/i.test(String(err))) {
         throw new Error(`WebBridge daemon not reachable at ${this.baseUrl}${path}`);
@@ -155,15 +215,19 @@ export class WebBridgeClient {
           data?.error || data?.message || data?.raw || text.slice(0, 800) || `HTTP ${res.status}`;
         throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
       }
-      // Daemon may return 200 with success:false
       if (data && data.success === false) {
         const msg = data.error || data.message || JSON.stringify(data);
         throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+      }
+      // Nested ok:false from some actions
+      if (data?.data && data.data.ok === false && data.data.error) {
+        throw new Error(String(data.data.error));
       }
       return data;
     } catch (err) {
       if (err?.name === "AbortError") throw new Error(`POST ${path} timed out after ${this.timeoutMs}ms`);
       if (err?.cause?.code === "ECONNREFUSED" || /fetch failed|ECONNREFUSED/i.test(String(err?.message))) {
+        this.invalidateStatusCache();
         throw new Error(`WebBridge daemon not reachable at ${this.baseUrl}`);
       }
       throw err;
@@ -175,6 +239,14 @@ export class WebBridgeClient {
 
 export function daemonBinaryPath() {
   return daemonBinary();
+}
+
+export function packageVersion() {
+  return PKG_VERSION;
+}
+
+export function expectedToolCount() {
+  return 28;
 }
 
 export function readIdentity() {

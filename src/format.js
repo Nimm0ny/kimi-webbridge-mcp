@@ -1,36 +1,63 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
+
+/** Max image bytes to embed as base64 (default ~400KB). Larger → path-only. */
+const MAX_EMBED_BYTES = Number(process.env.WEBBRIDGE_MAX_EMBED_BYTES || 400_000);
 
 /**
  * Format a daemon result for MCP content blocks.
- * Screenshots/PDFs that return a filesystem path are attached as images when possible.
+ * Screenshots/PDFs that return a filesystem path are attached as images when small enough.
+ * Results with ok:false are marked isError so models do not treat them as success.
  */
 export function formatResult(result, { preferImage = false } = {}) {
   if (result == null) {
     return { content: [{ type: "text", text: "null" }] };
   }
 
-  const content = [];
-  const path = typeof result.path === "string" ? result.path : null;
-  const mime = result.mimeType || guessMime(path, result.format);
+  const failed =
+    (typeof result === "object" && result !== null && result.ok === false) ||
+    (typeof result === "object" && result !== null && result.success === false);
 
+  const content = [];
+  const path = typeof result === "object" && result && typeof result.path === "string" ? result.path : null;
+  const mime =
+    typeof result === "object" && result
+      ? result.mimeType || guessMime(path, result.format)
+      : undefined;
+
+  let embedded = false;
   if (preferImage && path && existsSync(path) && mime?.startsWith("image/")) {
     try {
-      const buf = readFileSync(path);
-      content.push({
-        type: "image",
-        data: buf.toString("base64"),
-        mimeType: mime,
-      });
+      const size = statSync(path).size;
+      if (size <= MAX_EMBED_BYTES) {
+        const buf = readFileSync(path);
+        content.push({
+          type: "image",
+          data: buf.toString("base64"),
+          mimeType: mime,
+        });
+        embedded = true;
+      }
     } catch {
-      // fall through to text only
+      // path-only fallback
     }
   }
 
-  content.push({
-    type: "text",
-    text: typeof result === "string" ? result : JSON.stringify(result, null, 2),
-  });
+  const payload =
+    typeof result === "string"
+      ? result
+      : JSON.stringify(
+          embedded || !path
+            ? result
+            : { ...result, imageEmbedded: embedded, imageSkippedReason: embedded ? undefined : "over_size_cap" },
+          null,
+          2,
+        );
 
+  content.push({ type: "text", text: payload });
+
+  if (failed) {
+    return { content, isError: true };
+  }
   return { content };
 }
 
