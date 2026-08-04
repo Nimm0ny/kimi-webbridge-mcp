@@ -1,7 +1,7 @@
 {
   "name": "kimi-webbridge-mcp",
-  "version": "1.1.0",
-  "description": "MCP adapter for Kimi WebBridge — control your real browser from Grok Build, Claude Code, Cursor, and other MCP clients",
+  "version": "1.1.1",
+  "description": "MCP + Skill for Kimi WebBridge - real browser control for Grok Build, Claude Code, Cursor (Claude-in-Chrome style)",
   "type": "module",
   "private": false,
   "license": "MIT",
@@ -11,6 +11,7 @@
   "main": "./src/index.js",
   "files": [
     "src/**/*.js",
+    "skills/**/*",
     "README.md",
     "LICENSE"
   ],

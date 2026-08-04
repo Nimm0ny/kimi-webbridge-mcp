@@ -1,52 +1,40 @@
 # kimi-webbridge-mcp
 
-把已安装的 **[Kimi WebBridge](https://www.kimi.com/features/webbridge)**（本地 daemon + 浏览器扩展）暴露成标准 **MCP** 工具，供 **Grok Build / Claude Code / Cursor** 等客户端直接调用。
+把 **[Kimi WebBridge](https://www.kimi.com/features/webbridge)**（daemon + 浏览器扩展）接到 Agent，采用与 **Claude in Chrome 相同的架构分层**（不是去接入 Claude 产品）：
 
-- 控制**用户真实浏览器**（复用登录态 / Cookie，不导出 Cookie）
-- 无需每次写 `curl` 脚本
-- 含 Claude-in-Chrome 风格便利工具：`get_text` / `find` / `press_key` / `scroll` / `wait` / `console` 等
+| 层 | 本仓库 | 作用 |
+|----|--------|------|
+| **Skill**（薄） | `skills/kimi-webbridge/SKILL.md` | 何时用、工作流、禁止 curl |
+| **MCP** | `src/index.js` | 真正执行：`wb_*` 工具 |
 
 ```text
-MCP Client (Grok / Claude / Cursor)
-        │ stdio MCP
-        ▼
-kimi-webbridge-mcp  (本仓库)
-        │ HTTP  http://127.0.0.1:10086
-        ▼
-kimi-webbridge daemon
-        │ WebSocket
-        ▼
-Chrome / Edge 扩展 → 真实页面
+Grok Build（或其它 MCP 客户端）
+   ├── Skill   路由 + 用法约定
+   └── MCP     kimi-webbridge  →  :10086 daemon  →  扩展  →  真实浏览器
 ```
 
-> 本项目是独立开源适配层，与 Moonshot / Kimi / xAI **无隶属关系**。使用前需自行安装官方 WebBridge 扩展与 daemon。
+- 真实浏览器 profile / 登录态（不导出 Cookie）
+- 无 curl 脚本；约 28 个 `wb_*` 工具
+- 含 find / get_text / press_key / scroll / wait / console 等便利能力
+
+> 独立开源适配层，与 Moonshot / Kimi / xAI 无隶属关系。需自行安装官方 WebBridge。
 
 ---
 
-## 前置条件（每位同事都要）
+## 前置条件
 
-1. **Node.js 20+**
-2. **Kimi WebBridge 已安装并运行**
-   - 二进制：`~/.kimi-webbridge/bin/kimi-webbridge`（Windows: `%USERPROFILE%\.kimi-webbridge\bin\kimi-webbridge.exe`）
-   - 浏览器扩展已启用（Chrome 或 Edge）
-   - 帮助： [中文](https://www.kimi.com/zh-cn/features/webbridge) · [English](https://www.kimi.com/features/webbridge)
-3. 确认连通：
+1. Node.js 20+
+2. Kimi WebBridge 已安装，扩展已启用  
+   - 帮助：[中文](https://www.kimi.com/zh-cn/features/webbridge) · [English](https://www.kimi.com/features/webbridge)
+3. `extension_connected: true`：
 
 ```powershell
-# Windows
 & "$env:USERPROFILE\.kimi-webbridge\bin\kimi-webbridge.exe" start
-# 应看到 extension_connected: true
-```
-
-```bash
-# macOS / Linux
-~/.kimi-webbridge/bin/kimi-webbridge start
-curl -s http://127.0.0.1:10086/status
 ```
 
 ---
 
-## 安装本 MCP
+## 安装（MCP + Skill）
 
 ```bash
 git clone https://github.com/Nimm0ny/kimi-webbridge-mcp.git
@@ -55,13 +43,9 @@ npm install
 npm run doctor
 ```
 
-`doctor` 通过（`extension_connected: true`）后再接入客户端。
+### Grok Build
 
----
-
-## 接入 Grok Build
-
-编辑 `~/.grok/config.toml`（把路径换成你的 clone 绝对路径）：
+**MCP** — `~/.grok/config.toml`（路径改成你的 clone）：
 
 ```toml
 [mcp_servers.kimi-webbridge]
@@ -72,72 +56,29 @@ startup_timeout_sec = 15
 tool_timeout_sec = 120
 ```
 
-验证：
+**Skill**（薄 playbook）：
 
-```bash
-grok mcp doctor kimi-webbridge
+```powershell
+Copy-Item -Recurse -Force skills\kimi-webbridge "$env:USERPROFILE\.grok\skills\kimi-webbridge"
 ```
 
-正常应发现 **约 28 个** `wb_*` 工具。改代码后需重启 Grok 会话或在 `/mcps` 刷新。
+```bash
+mkdir -p ~/.grok/skills && cp -R skills/kimi-webbridge ~/.grok/skills/
+```
+
+验证：`grok mcp doctor kimi-webbridge`（约 28 个工具）。Skill 在新会话中生效。
+
+任意其它 MCP 客户端只需挂同一 `node .../src/index.js`，Skill 拷到该客户端的 skills 目录即可。
 
 ---
 
-## 接入 Claude Code
+## 工具摘要
 
-```bash
-claude mcp add kimi-webbridge -- node /absolute/path/to/kimi-webbridge-mcp/src/index.js
-```
+**核心：** `wb_status` · `wb_navigate` · `wb_snapshot` · `wb_click` · `wb_fill` · `wb_evaluate` · `wb_cdp` · `wb_screenshot` · `wb_network` · `wb_upload` · 标签管理  
 
-或写入 Claude / Cursor 的 MCP JSON：
+**便利（对齐 Claude-in-Chrome 能力面）：** `wb_get_text` · `wb_find` · `wb_press_key` · `wb_scroll` · `wb_wait` · `wb_console` · `wb_hover` · `wb_dblclick` · `wb_fill_form` · `wb_go_back` / `wb_reload`
 
-```json
-{
-  "mcpServers": {
-    "kimi-webbridge": {
-      "command": "node",
-      "args": ["/absolute/path/to/kimi-webbridge-mcp/src/index.js"]
-    }
-  }
-}
-```
-
----
-
-## 工具一览
-
-### 核心
-
-| Tool | 作用 |
-|------|------|
-| `wb_status` | daemon + 扩展是否就绪 |
-| `wb_set_session` | 设置任务 session（标签组） |
-| `wb_navigate` | 打开 URL |
-| `wb_find_tab` / `wb_list_tabs` / `wb_close_*` | 标签管理 |
-| `wb_snapshot` | a11y 树 + `@e` 引用 |
-| `wb_click` / `wb_fill` | 点击 / 填表 |
-| `wb_evaluate` / `wb_cdp` | 页面 JS / 原始 CDP |
-| `wb_screenshot` / `wb_save_as_pdf` | 截图 / PDF |
-| `wb_network` / `wb_upload` | 网络 / 上传 |
-
-### Claude-in-Chrome 风格
-
-| Tool | 作用 |
-|------|------|
-| `wb_get_text` | 抽取可见正文 |
-| `wb_find` | 按文案/role 搜 `@e` |
-| `wb_press_key` | 按键 / 快捷键 |
-| `wb_scroll` | 滚动 |
-| `wb_wait` | 等文本/选择器 |
-| `wb_console` | start/list 控制台 |
-| `wb_go_back` / `wb_go_forward` / `wb_reload` | 后退/前进/刷新 |
-| `wb_hover` / `wb_dblclick` | 悬停 / 双击 |
-| `wb_fill_form` | 批量填表 |
-
-推荐流程：
-
-```text
-wb_status → wb_navigate → wb_find / wb_snapshot → wb_click / wb_fill
-```
+默认流程见 Skill；细节见 `skills/kimi-webbridge/references/workflow.md`。
 
 ---
 
@@ -145,48 +86,34 @@ wb_status → wb_navigate → wb_find / wb_snapshot → wb_click / wb_fill
 
 | 变量 | 默认 | 含义 |
 |------|------|------|
-| `WEBBRIDGE_URL` | `http://127.0.0.1:10086` | daemon 地址 |
-| `WEBBRIDGE_SESSION` | `grok-webbridge` | 默认 session 名 |
-| `WEBBRIDGE_TIMEOUT_MS` | `120000` | 单次命令超时 |
-
-可选写入 MCP `env`：
-
-```toml
-[mcp_servers.kimi-webbridge.env]
-WEBBRIDGE_SESSION = "team-shared-task"
-```
+| `WEBBRIDGE_URL` | `http://127.0.0.1:10086` | daemon |
+| `WEBBRIDGE_SESSION` | `grok-webbridge` | 默认 session |
+| `WEBBRIDGE_TIMEOUT_MS` | `120000` | 超时 |
 
 ---
 
 ## 与 chrome-devtools-mcp
 
-| | kimi-webbridge-mcp | chrome-devtools-mcp |
-|--|--------------------|---------------------|
-| 浏览器 | 用户日常 profile | 常为独立自动化实例 |
-| 登录态 | 自动复用 | 需另配 |
-| 适用 | 已登录站点、真实操作 | 性能 trace、干净环境 |
-
-可同时启用。
+| | 本项目 | chrome-devtools |
+|--|--------|-----------------|
+| 浏览器 | 日常 profile | 常为独立实例 |
+| 登录态 | 复用 | 另配 |
+| 角色 | 真实站点操作 | 性能 / 干净环境 |
 
 ---
 
 ## 开发
 
 ```bash
-npm start          # 启动 MCP (stdio)
-npm run doctor     # 检查 daemon / 扩展
-npm run smoke      # 端到端冒烟（需扩展已连接）
+npm start          # MCP stdio
+npm run doctor
+npm run smoke
 ```
 
----
+## 安全
 
-## 安全说明
-
-- 仅连接本机 `127.0.0.1:10086`，不向外发送 Cookie。
-- Agent 能操作你浏览器里**已登录**的站点，请勿在不受信任环境启用。
-- 不要把含密钥的页面截图发到公开渠道。
-
----
+- 只连本机 `:10086`
+- Agent 可操作已登录站点，勿在不受信环境启用
 
 ## License
 
