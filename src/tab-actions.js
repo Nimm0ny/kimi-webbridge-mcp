@@ -120,13 +120,9 @@ export async function findTabSmart(client, { url, active, session } = {}) {
     });
   }
 
-  try {
-    return await client.command("find_tab", { url }, { session });
-  } catch (err) {
-    const msg = errText(err);
-    const tabs = await listSessionTabs(client, session);
-    return findByUrl(client, url, tabs, session, msg);
-  }
+  // Always resolve against list_tabs first — daemon may host-match incorrectly (Bilibili home vs /video/BV...)
+  const tabs = await listSessionTabs(client, session);
+  return findByUrl(client, url, tabs, session, null);
 }
 
 async function findByUrl(client, url, tabs, session, daemonMsg) {
@@ -149,14 +145,31 @@ async function findByUrl(client, url, tabs, session, daemonMsg) {
   }
 
   if (best && bestScore >= 70) {
-    const r = await client.command("find_tab", { url: best.url }, { session });
-    return {
-      ...r,
-      matchedVia: "fuzzy",
-      requestedUrl: url,
-      resolvedUrl: best.url,
-      matchScore: bestScore,
-    };
+    try {
+      const r = await client.command("find_tab", { url: best.url }, { session });
+      // Verify daemon did not return a different host path
+      const got = r?.data?.url || r?.url;
+      if (got && scoreTab({ url: got }, url) < 70) {
+        throw new ToolError("find_tab resolved to a wrong tab", {
+          code: "find_tab_wrong_tab",
+          detail: { requested: url, resolved: best.url, daemonReturned: got, matchScore: bestScore },
+          hint: "Retry with exact URL from wb_list_tabs; prefer path-specific URLs (/video/BVxx).",
+        });
+      }
+      return {
+        ...r,
+        matchedVia: bestScore >= 95 ? "exact" : "fuzzy",
+        requestedUrl: url,
+        resolvedUrl: best.url,
+        matchScore: bestScore,
+      };
+    } catch (err) {
+      if (err instanceof ToolError) throw err;
+      throw asToolError(err, {
+        problem: "find_tab failed after local URL resolve",
+        hint: `Resolved ${best.url} (score ${bestScore}) but daemon rejected it. Check list_tabs.`,
+      });
+    }
   }
 
   throw new ToolError(`No tab matching ${url} in this session`, {
