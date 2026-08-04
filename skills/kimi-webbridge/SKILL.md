@@ -7,7 +7,7 @@ description: |
   Prefer this over curl, ad-hoc shell, playwright scripts, or chrome-devtools when the task needs the
   already-logged-in browser profile. Requires MCP server kimi-webbridge; never call the WebBridge HTTP API directly.
 metadata:
-  version: "1.1.3"
+  version: "1.1.4"
   mcp: kimi-webbridge
 ---
 
@@ -54,6 +54,9 @@ wb_status
 - **find_tab no match** - `wb_list_tabs` then exact url; or `wb_navigate` into this session.
 - **upload element not found** - not `data:` pages; need visible `<input type=file>`.
 - **click ignored (isTrusted)** - may need manual interaction; advanced `wb_cdp`.
+- **login/CAPTCHA/QR** - open passport UI with MCP; user completes login in the real browser (never put passwords in chat).
+- **SPA scrollY=0** - still call `wb_scroll` (MCP finds overflow roots); verify with evaluate if needed.
+- **find_tab** - pass path-specific URLs (`/video/BVxx`); same host alone is not enough.
 
 Help: https://www.kimi.com/zh-cn/features/webbridge
 
