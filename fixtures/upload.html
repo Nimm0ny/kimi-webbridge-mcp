@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>WB Fixture Upload</title>
+</head>
+<body>
+  <h1>Upload fixture</h1>
+  <input type="file" id="f" />
+  <button type="button" id="b" onclick="document.getElementById('out').textContent = 'files:' + (document.getElementById('f').files?.length || 0)">Go</button>
+  <pre id="out"></pre>
+</body>
+</html>

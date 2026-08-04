@@ -3,6 +3,8 @@
  * Failures throw Error so MCP returns isError (no silent ok:false success).
  */
 
+import { ToolError } from "./errors.js";
+
 export function unwrap(result) {
   if (result && typeof result === "object" && "data" in result && result.data !== undefined) {
     return result.data;
@@ -310,9 +312,18 @@ export async function waitFor(client, { text, selector, timeoutMs = 15000, inter
         if (body.includes(text)) return JSON.stringify({ ok: true, found: "text", text });
       }
       if (!text && !selector) {
-        return JSON.stringify({ ok: true, found: "ready", readyState: document.readyState });
+        if (document.readyState === "complete" || document.readyState === "interactive") {
+          return JSON.stringify({ ok: true, found: "ready", readyState: document.readyState });
+        }
       }
-      return JSON.stringify({ ok: false, readyState: document.readyState, title: document.title });
+      const body = document.body ? (document.body.innerText || "").slice(0, 200) : "";
+      return JSON.stringify({
+        ok: false,
+        readyState: document.readyState,
+        title: document.title,
+        href: location.href,
+        bodyPreview: body,
+      });
     })()`;
     last = await evaluateJson(client, code, session);
     if (last && last.ok) {
@@ -320,11 +331,21 @@ export async function waitFor(client, { text, selector, timeoutMs = 15000, inter
     }
     await sleep(interval);
   }
-  throw new Error(
-    `wb_wait timeout after ${timeoutMs}ms` +
-      (text ? ` text=${JSON.stringify(text)}` : "") +
-      (selector ? ` selector=${JSON.stringify(selector)}` : "") +
-      (last ? ` last=${JSON.stringify(last)}` : ""),
+
+  const httpish = /503|502|500|404|unavailable|error/i.test(
+    `${last?.title || ""} ${last?.bodyPreview || ""}`,
+  );
+  throw new ToolError(
+    `Wait timed out after ${timeoutMs}ms` +
+      (text ? ` for text ${JSON.stringify(text)}` : "") +
+      (selector ? ` for selector ${JSON.stringify(selector)}` : ""),
+    {
+      code: "wait_timeout",
+      detail: last,
+      hint: httpish
+        ? "Page looks like an HTTP error (e.g. 503). Use a stable URL or local fixture (fixtures/form.html via file://), not flaky third-party demos."
+        : "Re-check selector/text with wb_snapshot/wb_get_text; increase timeoutMs; ensure navigate finished.",
+    },
   );
 }
 

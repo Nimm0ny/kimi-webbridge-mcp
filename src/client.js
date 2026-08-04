@@ -135,7 +135,7 @@ export class WebBridgeClient {
     throw new Error("daemon start timed out - is port 10086 blocked?");
   }
 
-  async command(action, args = {}, { session, requireExtension = true } = {}) {
+  async command(action, args = {}, { session, requireExtension = true, timeoutMs } = {}) {
     const ensured = await this.ensureDaemon();
     if (requireExtension) {
       // Reuse status from ensure when fresh; otherwise one cached/forced check
@@ -162,7 +162,7 @@ export class WebBridgeClient {
       session: this.resolveSession(session),
     };
 
-    return this.#post("/command", body);
+    return this.#post("/command", body, timeoutMs);
   }
 
   async #get(path) {
@@ -193,9 +193,10 @@ export class WebBridgeClient {
     }
   }
 
-  async #post(path, body) {
+  async #post(path, body, timeoutMs) {
+    const limit = Number(timeoutMs) > 0 ? Number(timeoutMs) : this.timeoutMs;
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), this.timeoutMs);
+    const t = setTimeout(() => ctrl.abort(), limit);
     try {
       const res = await fetch(`${this.baseUrl}${path}`, {
         method: "POST",
@@ -219,13 +220,20 @@ export class WebBridgeClient {
         const msg = data.error || data.message || JSON.stringify(data);
         throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
       }
-      // Nested ok:false from some actions
-      if (data?.data && data.data.ok === false && data.data.error) {
-        throw new Error(String(data.data.error));
+      // Daemon soft-fail shapes: { ok:false, error } or nested data.ok:false
+      if (data && data.ok === false) {
+        const e = data.error || data.message || data;
+        throw new Error(typeof e === "string" ? e : e?.message || JSON.stringify(e));
+      }
+      if (data?.data && data.data.ok === false) {
+        const e = data.data.error || data.data.message || data.data;
+        throw new Error(typeof e === "string" ? e : e?.message || JSON.stringify(e));
       }
       return data;
     } catch (err) {
-      if (err?.name === "AbortError") throw new Error(`POST ${path} timed out after ${this.timeoutMs}ms`);
+      if (err?.name === "AbortError") {
+        throw new Error(`POST ${path} timed out after ${limit}ms (action=${body?.action || "?"})`);
+      }
       if (err?.cause?.code === "ECONNREFUSED" || /fetch failed|ECONNREFUSED/i.test(String(err?.message))) {
         this.invalidateStatusCache();
         throw new Error(`WebBridge daemon not reachable at ${this.baseUrl}`);

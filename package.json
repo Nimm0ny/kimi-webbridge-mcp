@@ -1,6 +1,6 @@
 {
   "name": "kimi-webbridge-mcp",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "MCP + Skill for Kimi WebBridge - real browser control for Grok Build (Claude-in-Chrome architecture)",
   "type": "module",
   "private": false,
@@ -12,6 +12,7 @@
   "files": [
     "src/**/*.js",
     "skills/**/*",
+    "fixtures/**/*",
     "README.md",
     "LICENSE"
   ],

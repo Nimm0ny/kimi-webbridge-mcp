@@ -16,6 +16,7 @@ Grok Build（或其它 MCP 客户端）
 - 真实浏览器 profile / 登录态（不导出 Cookie）
 - 无 curl 脚本；约 28 个 `wb_*` 工具
 - 含 find / get_text / press_key / scroll / wait / console 等便利能力
+- 错误带 `problem` + `hint`；截图默认 jpeg、超时自动降质重试 / CDP 回退；`find_tab` 支持模糊 URL 与 active 恢复
 
 > 独立开源适配层，与 Moonshot / Kimi / xAI 无隶属关系。需自行安装官方 WebBridge。
 

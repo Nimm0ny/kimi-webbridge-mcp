@@ -9,7 +9,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { packageVersion, WebBridgeClient } from "./client.js";
-import { formatError, formatResult } from "./format.js";
+import { savePdfSmart, screenshotSmart } from "./capture.js";
+import { formatToolError } from "./errors.js";
+import { formatResult } from "./format.js";
 import {
   consoleCmd,
   dblclick,
@@ -25,6 +27,9 @@ import {
   unwrap,
   waitFor,
 } from "./page-actions.js";
+import { findTabSmart } from "./tab-actions.js";
+import { ToolError } from "./errors.js";
+import { existsSync } from "node:fs";
 
 const VERSION = packageVersion();
 const client = new WebBridgeClient();
@@ -37,13 +42,15 @@ const server = new McpServer(
   {
     instructions: [
       "Kimi WebBridge controls the user's REAL browser (existing logins/cookies) via a local daemon + Chrome/Edge extension.",
-      "Workflow: wb_status → wb_navigate (or wb_find_tab active:true) → wb_snapshot or wb_find → wb_click/wb_fill using @e refs.",
+      "Workflow: wb_status → wb_navigate (or wb_find_tab) → wb_snapshot or wb_find → wb_click/wb_fill using @e refs.",
       "Claude-in-Chrome style helpers: wb_get_text, wb_find, wb_press_key, wb_scroll, wb_wait, wb_console, wb_go_back, wb_go_forward, wb_reload, wb_hover, wb_dblclick, wb_fill_form.",
-      "Prefer wb_snapshot/wb_find + @eN refs over CSS/JS. Use wb_evaluate/wb_cdp only as escape hatches — never for stealing secrets/cookies/exporting credentials.",
-      "Session = tab group. Default session is auto-injected. Per-call session does NOT change the default (use wb_set_session for that).",
+      "wb_screenshot defaults to jpeg for reliability; on timeout it auto-retries smaller jpeg. Prefer selector crop for huge pages.",
+      "wb_find_tab fuzzy-matches session URLs; active:true works even when the extension requires a url (resolves via list_tabs).",
+      "Prefer wb_snapshot/wb_find + @eN refs over CSS/JS. Use wb_evaluate/wb_cdp only as escape hatches — never for stealing secrets/cookies.",
+      "Errors return JSON with problem + hint lines — read them before retrying.",
+      "Session = tab group. Per-call session does NOT change the default (use wb_set_session).",
       "wb_close_session only when the user asks to close agent tabs.",
-      "Not chrome-devtools-mcp: never launches an isolated browser. For performance traces use chrome-devtools MCP alongside this.",
-      "If extension disconnected: enable Kimi WebBridge in the browser (edge://extensions or chrome://extensions).",
+      "If extension disconnected: enable Kimi WebBridge in the browser.",
     ].join("\n"),
   },
 );
@@ -51,11 +58,11 @@ const server = new McpServer(
 function tool(name, description, shape, handler, { preferImage = false } = {}) {
   server.tool(name, description, shape, async (args) => {
     try {
-      // session is per-call only — do NOT mutate client default (avoids cross-task pollution)
+      // session is per-call only — do NOT mutate client default
       const result = await handler(args ?? {});
       return formatResult(result, { preferImage });
     } catch (err) {
-      return formatError(err);
+      return formatToolError(err, { tool: name });
     }
   });
 }
@@ -144,18 +151,13 @@ tool(
 
 tool(
   "wb_find_tab",
-  "Select a tab as current. Default: session-owned tabs by URL. active:true borrows the tab the USER is viewing.",
+  "Select a tab as current. URL match is fuzzy within the session (trailing slash/query tolerant). active:true borrows the focused session tab when possible.",
   {
-    url: z.string().optional().describe("Full URL of a session-owned tab"),
-    active: z.boolean().optional().describe("Borrow user's focused tab"),
+    url: z.string().optional().describe("URL of a session-owned tab (exact or fuzzy)"),
+    active: z.boolean().optional().describe("Prefer the active/focused tab in this session"),
     session: sessionOpt,
   },
-  async ({ url, active, session }) => {
-    const args = {};
-    if (url) args.url = url;
-    if (active != null) args.active = active;
-    return client.command("find_tab", args, { session });
-  },
+  async ({ url, active, session }) => findTabSmart(client, { url, active, session }),
 );
 
 tool(
@@ -356,11 +358,11 @@ tool(
 
 tool(
   "wb_screenshot",
-  "Screenshot current tab (or a selector). Returns filesystem path; embeds image when under size cap (path always returned).",
+  "Screenshot current tab (or selector). Default format=jpeg for reliability; auto-retries smaller jpeg on timeout. Returns path; embeds image when under size cap. Errors include problem+hint.",
   {
-    format: z.enum(["png", "jpeg"]).optional(),
-    quality: z.number().int().min(0).max(100).optional(),
-    selector: z.string().optional(),
+    format: z.enum(["png", "jpeg"]).optional().describe("Default jpeg (faster/more reliable than png)"),
+    quality: z.number().int().min(0).max(100).optional().describe("JPEG quality; default 65"),
+    selector: z.string().optional().describe("Optional @e/CSS crop — use for large pages"),
     path: z.string().optional(),
     session: sessionOpt,
   },
@@ -370,14 +372,14 @@ tool(
     if (quality != null) args.quality = quality;
     if (selector) args.selector = selector;
     if (path) args.path = path;
-    return client.command("screenshot", args, { session });
+    return screenshotSmart(client, args, session);
   },
   { preferImage: true },
 );
 
 tool(
   "wb_save_as_pdf",
-  "Render current page to PDF; returns filesystem path.",
+  "Render current page to PDF; returns filesystem path. Long timeout; on failure returns problem+hint.",
   {
     paper_format: z.enum(["letter", "a4", "legal", "a3", "tabloid"]).optional(),
     landscape: z.boolean().optional(),
@@ -393,7 +395,7 @@ tool(
     if (scale != null) args.scale = scale;
     if (print_background != null) args.print_background = print_background;
     if (path) args.path = path;
-    return client.command("save_as_pdf", args, { session });
+    return savePdfSmart(client, args, session);
   },
 );
 
@@ -428,19 +430,48 @@ tool(
 
 tool(
   "wb_upload",
-  "Set files on a file input element. files must be absolute local filesystem paths (never remote URLs).",
+  "Set files on a file input element. files must be absolute local filesystem paths (not http/data URLs). Page must already show <input type=file>.",
   {
     selector: z.string().min(1),
     files: z.array(z.string()).min(1).describe("Absolute local filesystem paths only"),
     session: sessionOpt,
   },
-  async ({ selector, files, session }) =>
-    client.command("upload", { selector, files }, { session }),
+  async ({ selector, files, session }) => {
+    for (const f of files) {
+      if (/^(https?:|data:|blob:)/i.test(f)) {
+        throw new ToolError("upload files must be local filesystem paths, not URLs", {
+          code: "upload_bad_path",
+          detail: f,
+          hint: "Pass absolute paths like C:\\\\Users\\\\...\\\\file.pdf. Open a real page with <input type=file> first (data: URLs are unreliable).",
+        });
+      }
+      if (!existsSync(f)) {
+        throw new ToolError(`Upload file does not exist: ${f}`, {
+          code: "upload_missing_file",
+          hint: "Check the absolute path on disk before wb_upload.",
+        });
+      }
+    }
+    // Quick page diagnostics if element likely missing
+    try {
+      return await client.command("upload", { selector, files }, { session });
+    } catch (err) {
+      const msg = err?.message || String(err);
+      if (/element not found/i.test(msg)) {
+        throw new ToolError(`File input not found: ${selector}`, {
+          code: "upload_no_input",
+          detail: msg,
+          hint: "wb_snapshot/find the file input first. Avoid data: pages; use http(s) or file:// fixture (fixtures/upload.html). Ensure input type=file is in the top frame.",
+        });
+      }
+      throw err;
+    }
+  },
 );
 
 // Boot
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error(
-  `[kimi-webbridge-mcp] v${VERSION} ready session=${client.getSession()} url=${process.env.WEBBRIDGE_URL || "http://127.0.0.1:10086"} tools=28`,
+  `[kimi-webbridge-mcp] v${VERSION} ready session=${client.getSession()} url=${process.env.WEBBRIDGE_URL || "http://127.0.0.1:10086"} tools=28 hardened=screenshot,find_tab,errors`,
 );

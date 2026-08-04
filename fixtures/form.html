@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>WB Fixture Form</title>
+</head>
+<body>
+  <h1>WebBridge form fixture</h1>
+  <form id="f" action="#" method="get" onsubmit="event.preventDefault(); document.getElementById('out').textContent='submitted';">
+    <label>Name <input name="custname" id="custname" type="text" /></label><br/>
+    <label>Tel <input name="custtel" id="custtel" type="text" /></label><br/>
+    <label>Email <input name="custemail" id="custemail" type="email" /></label><br/>
+    <button type="submit" id="submit">Submit</button>
+  </form>
+  <p id="out"></p>
+</body>
+</html>
