@@ -152,14 +152,28 @@ async function findByUrl(client, url, tabs, session, daemonMsg) {
   if (best && bestScore >= 70) {
     try {
       const r = await client.command("find_tab", { url: best.url }, { session });
-      // Verify daemon did not return a different host path
+      // Verify daemon did not host-match the wrong tab (Bilibili home vs /video/BV...)
       const got = r?.data?.url || r?.url;
       if (got && scoreTab({ url: got }, url) < 70) {
-        throw new ToolError("find_tab resolved to a wrong tab", {
-          code: "find_tab_wrong_tab",
-          detail: { requested: url, resolved: best.url, daemonReturned: got, matchScore: bestScore },
-          hint: "Retry with exact URL from wb_list_tabs; prefer path-specific URLs (/video/BVxx).",
-        });
+        // Daemon selected wrong tab but we know the right URL — navigate current target to it
+        const nav = await client.command(
+          "navigate",
+          { url: best.url, newTab: false },
+          { session },
+        );
+        return {
+          ok: true,
+          data: {
+            success: true,
+            url: best.url,
+            matchedVia: "navigate-fallback",
+            requestedUrl: url,
+            resolvedUrl: best.url,
+            matchScore: bestScore,
+            daemonReturned: got,
+            navigate: nav?.data || nav,
+          },
+        };
       }
       return {
         ...r,
@@ -170,10 +184,32 @@ async function findByUrl(client, url, tabs, session, daemonMsg) {
       };
     } catch (err) {
       if (err instanceof ToolError) throw err;
-      throw asToolError(err, {
-        problem: "find_tab failed after local URL resolve",
-        hint: `Resolved ${best.url} (score ${bestScore}) but daemon rejected it. Check list_tabs.`,
-      });
+      // Last resort: open the resolved URL in-session
+      try {
+        const nav = await client.command(
+          "navigate",
+          { url: best.url, newTab: false },
+          { session },
+        );
+        return {
+          ok: true,
+          data: {
+            success: true,
+            url: best.url,
+            matchedVia: "navigate-fallback-after-error",
+            requestedUrl: url,
+            resolvedUrl: best.url,
+            matchScore: bestScore,
+            daemonError: err.message,
+            navigate: nav?.data || nav,
+          },
+        };
+      } catch (err2) {
+        throw asToolError(err2, {
+          problem: "find_tab failed after local URL resolve",
+          hint: `Resolved ${best.url} (score ${bestScore}) but daemon rejected it. Check list_tabs.`,
+        });
+      }
     }
   }
 
