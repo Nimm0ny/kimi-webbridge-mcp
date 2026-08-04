@@ -490,6 +490,29 @@ export async function clickSmart(client, selector, session, { followNewTab = tru
     }
   }
 
+  // New tab may be outside session group (Bilibili often does this) — borrow browser active tab
+  try {
+    const { findTabSmart } = await import("./tab-actions.js");
+    const borrowed = await findTabSmart(client, { active: true, session });
+    const url =
+      borrowed?.data?.url ||
+      borrowed?.url ||
+      borrowed?.resolvedUrl ||
+      null;
+    if (url && beforeHref && url.split("?")[0] !== beforeHref.split("?")[0]) {
+      return {
+        ok: true,
+        click: clickResult,
+        followedNewTab: true,
+        borrowedActive: true,
+        url,
+        findTab: borrowed,
+      };
+    }
+  } catch {
+    /* ignore */
+  }
+
   return { ok: true, click: clickResult, followedNewTab: false };
 }
 
