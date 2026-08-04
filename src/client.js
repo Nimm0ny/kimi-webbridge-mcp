@@ -254,7 +254,9 @@ export function packageVersion() {
 }
 
 export function expectedToolCount() {
-  return 28;
+  // Lazy import-free: compact default 20, full 28
+  const p = String(process.env.WEBBRIDGE_TOOL_PROFILE || "compact").toLowerCase();
+  return p === "full" || p === "all" ? 28 : 20;
 }
 
 export function readIdentity() {

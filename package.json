@@ -1,7 +1,7 @@
 {
   "name": "kimi-webbridge-mcp",
-  "version": "1.1.4",
-  "description": "MCP + Skill for Kimi WebBridge - real browser control for Grok Build (Claude-in-Chrome architecture)",
+  "version": "1.2.0",
+  "description": "Compact MCP + thin Skill for Kimi WebBridge (Claude-in-Chrome sized tool surface)",
   "type": "module",
   "private": false,
   "license": "MIT",

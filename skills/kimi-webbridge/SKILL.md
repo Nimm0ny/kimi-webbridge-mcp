@@ -7,22 +7,23 @@ description: |
   Prefer this over curl, ad-hoc shell, playwright scripts, or chrome-devtools when the task needs the
   already-logged-in browser profile. Requires MCP server kimi-webbridge; never call the WebBridge HTTP API directly.
 metadata:
-  version: "1.1.4"
+  version: "1.2.0"
   mcp: kimi-webbridge
 ---
 
 # Kimi WebBridge
 
-Architecture (Claude-in-Chrome style): **this Skill = thin playbook**; **MCP = wb_* tools**.
+**Skill = thin playbook. MCP = tools.** Default tool profile is **compact** (~20 tools, Claude-in-Chrome sized). Prefer accuracy over calling many tools.
 
 ## Rules
 
-1. **MCP only** - `wb_*` tools. Never curl / temp JSON / daemon CLI for page actions.
-2. **Real profile first** - WebBridge when login/cookies matter; chrome-devtools only for clean/perf if asked.
-3. **One task = one session** - per-call `session` does not change default; use `wb_set_session` when needed.
-4. **See before act** - `wb_find` / `wb_snapshot` then `@e` for click/fill.
-5. **Close only if asked** - `wb_close_session` / `wb_close_tab` only on user request.
-6. **Read error JSON** - failures return `problem` + `hint`; follow the hint before inventing workarounds.
+1. **MCP only** - `wb_*`. Never curl / temp JSON / daemon CLI.
+2. **Few tools** - status → navigate → find/snapshot → click/fill → text/screenshot. Do not spam optional tools.
+3. **See before act** - `wb_find` / `wb_snapshot`, then `@e` for click/fill.
+4. **Session** - optional `session` arg per call; one task one session name.
+5. **Close only if asked** - `wb_close_tab` when user wants tabs cleared.
+6. **Read `problem` + `hint`** on errors before inventing workarounds.
+7. **Login/CAPTCHA/QR** - open UI with MCP; user completes login in the real browser (never put passwords in chat).
 
 ## Workflow
 
@@ -30,34 +31,29 @@ Architecture (Claude-in-Chrome style): **this Skill = thin playbook**; **MCP = w
 wb_status
   -> wb_navigate (newTab + group_title on first open)
   -> wb_find | wb_snapshot
-  -> wb_click | wb_fill | wb_fill_form | wb_press_key | wb_scroll | wb_hover
-  -> wb_get_text | wb_screenshot | wb_console | wb_network as needed
+  -> wb_click | wb_fill   (@e; click auto-follows new tabs)
+  -> wb_get_text | wb_screenshot | wb_wait as needed
 ```
 
 | Need | Tool |
 |------|------|
 | Health | `wb_status` |
 | Open | `wb_navigate` |
-| Switch tab | `wb_find_tab` (url fuzzy-match or `active:true`) |
+| Tabs | `wb_list_tabs` / `wb_find_tab` (path-aware) / `wb_close_tab` |
 | Structure | `wb_snapshot` / `wb_find` |
 | Text | `wb_get_text` |
-| Wait | `wb_wait` (on timeout, trust problem/hint) |
-| Screenshot | `wb_screenshot` (default jpeg; auto-retry if slow) |
-| Forms | `wb_fill` / `wb_fill_form` on stable pages (avoid flaky 503 demos) |
-| Upload | `wb_upload` with **local absolute paths** on a real file input page |
+| Wait | `wb_wait` |
+| Click / type | `wb_click` (follows new tab), `wb_fill`, `wb_press_key` |
+| Scroll | `wb_scroll` (SPA/video: DOM roots + wheel) |
+| Capture | `wb_screenshot` (jpeg default) |
+| Debug | `wb_console`, `wb_network`, `wb_evaluate` |
+| Upload | `wb_upload` (local absolute paths) |
 
-## Failures (quick)
+## Notes
 
-- **extension disconnected** - user enables Kimi WebBridge; no curl fallback.
-- **@e missing** - fresh `wb_snapshot` / `wb_find`.
-- **wait/screenshot timeout** - use hints; jpeg/selector crop; check page is not 503/error.
-- **find_tab no match** - `wb_list_tabs` then exact url; or `wb_navigate` into this session.
-- **upload element not found** - not `data:` pages; need visible `<input type=file>`.
-- **click ignored (isTrusted)** - may need manual interaction; advanced `wb_cdp`.
-- **login/CAPTCHA/QR** - open passport UI with MCP; user completes login in the real browser (never put passwords in chat).
-- **SPA scrollY=0** - still call `wb_scroll` (MCP finds overflow roots); verify with evaluate if needed.
-- **find_tab** - pass path-specific URLs (`/video/BVxx`); same host alone is not enough.
+- **New tab after click** (B站动态/收藏): `wb_click` switches current tab when a new session tab appears.
+- **find_tab**: use full path URLs (`/video/BVxx`), not bare host.
+- **Scroll**: if one call does not move, try again or `wb_press_key` PageDown; do not add extra tools.
+- Full extras (cdp/pdf/hover/form/session): `WEBBRIDGE_TOOL_PROFILE=full` only if needed.
 
 Help: https://www.kimi.com/zh-cn/features/webbridge
-
-Optional: `references/workflow.md`.

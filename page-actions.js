@@ -4,7 +4,6 @@
  */
 
 import { ToolError } from "./errors.js";
-// ToolError used by scroll CDP fallback
 
 export function unwrap(result) {
   if (result && typeof result === "object" && "data" in result && result.data !== undefined) {
@@ -277,220 +276,74 @@ export async function scroll(client, { selector, direction, amount, x, y }, sess
     return assertOk(await evaluateJson(client, code, session), "scroll");
   }
 
-  const amt = Number(amount ?? 600);
-  const dx = x != null ? Number(x) : direction === "left" ? -amt : direction === "right" ? amt : 0;
-  const dy = y != null ? Number(y) : direction === "up" ? -amt : direction === "down" || !direction ? amt : 0;
-
-  // 1) Multi-root DOM scroll (SPAs often don't move window.scrollY)
-  const domResult = await evaluateJson(
-    client,
-    `(() => {
-      const sel = ${JSON.stringify(selector || null)};
-      const dx = ${dx};
-      const dy = ${dy};
-      if (sel) {
-        const el = document.querySelector(sel);
-        if (!el) return JSON.stringify({ ok: false, error: "element not found: " + sel });
-        el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-        return JSON.stringify({ ok: true, mode: "intoView", selector: sel, moved: true });
-      }
-      function collectRoots() {
-        const list = [];
-        const push = (el) => { if (el && !list.includes(el)) list.push(el); };
-        push(document.scrollingElement);
-        push(document.documentElement);
-        push(document.body);
-        for (const el of document.querySelectorAll("div,main,section,article,aside")) {
-          try {
-            const st = getComputedStyle(el);
-            const oy = st.overflowY, ox = st.overflowX;
-            const can = /auto|scroll|overlay/.test(oy) || /auto|scroll|overlay/.test(ox);
-            const dy0 = el.scrollHeight - el.clientHeight;
-            const dx0 = el.scrollWidth - el.clientWidth;
-            if (can && (dy0 > 40 || dx0 > 40) && el.clientHeight > 80) list.push(el);
-          } catch (_) {}
-        }
-        return list;
-      }
-      const roots = collectRoots();
-      const attempts = [];
-      let moved = false;
-      for (const root of roots.slice(0, 25)) {
-        const beforeY = root.scrollTop;
-        const beforeX = root.scrollLeft;
+  // SPA sites (Bilibili etc.) often scroll overflow containers, not window
+  const code = `(() => {
+    const sel = ${JSON.stringify(selector || null)};
+    const direction = ${JSON.stringify(direction || null)};
+    const amount = ${Number(amount ?? 600)};
+    const x = ${x == null ? "null" : Number(x)};
+    const y = ${y == null ? "null" : Number(y)};
+    function scrollableRoot() {
+      const cands = [
+        document.scrollingElement,
+        document.documentElement,
+        document.body,
+        document.querySelector('#app'),
+        document.querySelector('.app'),
+        document.querySelector('main'),
+        ...document.querySelectorAll('div'),
+      ].filter(Boolean);
+      let best = document.scrollingElement || document.documentElement;
+      let bestScore = 0;
+      for (const el of cands.slice(0, 80)) {
         try {
-          if (typeof root.scrollBy === "function") root.scrollBy({ left: dx, top: dy, behavior: "instant" });
-          else { root.scrollTop = beforeY + dy; root.scrollLeft = beforeX + dx; }
-        } catch (_) {
-          root.scrollTop = beforeY + dy;
-          root.scrollLeft = beforeX + dx;
-        }
-        const afterY = root.scrollTop;
-        const afterX = root.scrollLeft;
-        const did = afterY !== beforeY || afterX !== beforeX;
-        attempts.push({
-          root: root.tagName + (root.id ? "#" + root.id : ""),
-          beforeY, afterY, did,
-        });
-        if (did) {
-          moved = true;
-          return JSON.stringify({
-            ok: true, mode: "dom-root", moved: true, dx, dy,
-            scrollTopBefore: beforeY, scrollTopAfter: afterY,
-            root: root.tagName + (root.id ? "#" + root.id : ""),
-          });
-        }
+          const st = getComputedStyle(el);
+          const oy = st.overflowY;
+          const canY = (oy === 'auto' || oy === 'scroll' || el === document.scrollingElement || el === document.documentElement);
+          const delta = el.scrollHeight - el.clientHeight;
+          if (canY && delta > bestScore) { best = el; bestScore = delta; }
+        } catch (_) {}
       }
-      window.scrollBy(dx, dy);
-      return JSON.stringify({
-        ok: true, mode: "window-fallback", moved: (window.scrollY || 0) !== 0, dx, dy,
-        scrollY: window.scrollY, attempts: attempts.slice(0, 8),
-      });
-    })()`,
-    session,
-  );
-
-  if (domResult?.moved) return assertOk(domResult, "scroll");
-
-  // 2) CDP mouse wheel (works when page uses non-scrollTop virtual lists / listeners)
-  try {
-    const vp = await evaluateJson(
-      client,
-      `(() => JSON.stringify({ w: window.innerWidth||800, h: window.innerHeight||600 }))()`,
-      session,
-    );
-    const cx = Math.floor((vp?.w || 800) / 2);
-    const cy = Math.floor((vp?.h || 600) / 2);
-    await cdp(
-      client,
-      "Input.dispatchMouseEvent",
-      {
-        type: "mouseWheel",
-        x: cx,
-        y: cy,
-        deltaX: dx,
-        deltaY: dy,
-        modifiers: 0,
-      },
-      session,
-    );
-    await sleep(80);
-    return {
+      return best;
+    }
+    if (sel) {
+      const el = document.querySelector(sel);
+      if (!el) return JSON.stringify({ ok: false, error: "element not found: " + sel });
+      el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      return JSON.stringify({ ok: true, mode: "intoView", selector: sel });
+    }
+    const root = scrollableRoot();
+    const before = root.scrollTop || window.scrollY || 0;
+    if (x != null || y != null) {
+      if (root === document.scrollingElement || root === document.documentElement || root === document.body) {
+        window.scrollBy(x || 0, y || 0);
+      } else {
+        root.scrollTop = (root.scrollTop || 0) + (y || 0);
+        root.scrollLeft = (root.scrollLeft || 0) + (x || 0);
+      }
+      return JSON.stringify({ ok: true, mode: "by", x: x || 0, y: y || 0, scrollTop: root.scrollTop, scrollY: window.scrollY, root: root.tagName + (root.id ? '#'+root.id : '') });
+    }
+    const map = { up: [0, -amount], down: [0, amount], left: [-amount, 0], right: [amount, 0] };
+    const delta = map[direction] || [0, amount];
+    if (root === document.scrollingElement || root === document.documentElement || root === document.body) {
+      window.scrollBy(delta[0], delta[1]);
+    } else {
+      root.scrollTop = (root.scrollTop || 0) + delta[1];
+      root.scrollLeft = (root.scrollLeft || 0) + delta[0];
+    }
+    const after = root.scrollTop || window.scrollY || 0;
+    return JSON.stringify({
       ok: true,
-      mode: "cdp-wheel",
-      moved: true,
-      dx,
-      dy,
-      note: "DOM scrollTop did not change; used CDP mouseWheel",
-      dom: domResult,
-    };
-  } catch (err) {
-    if (domResult?.ok) return { ...domResult, moved: false, warning: "scroll may not have moved", cdpError: err.message };
-    throw new ToolError("Scroll failed on this page layout", {
-      code: "scroll_failed",
-      detail: { dom: domResult, cdp: err.message },
-      hint: "Try selector/@e scrollIntoView, or PageDown via wb_press_key. Some players intercept wheel.",
+      mode: "direction",
+      direction: direction || "down",
+      amount,
+      scrollTopBefore: before,
+      scrollTopAfter: after,
+      moved: after !== before,
+      root: root.tagName + (root.id ? '#' + root.id : '') + (root.className ? '.' + String(root.className).split(/\\s+/).slice(0,2).join('.') : ''),
     });
-  }
-}
-
-// ── Click with optional new-tab follow ────────────────────────
-
-export async function clickSmart(client, selector, session, { followNewTab = true } = {}) {
-  let beforeIds = new Set();
-  let beforeById = new Map();
-  let beforeHref = null;
-  if (followNewTab) {
-    try {
-      const listed = unwrap(await client.command("list_tabs", {}, { session }));
-      const beforeTabs = listed?.tabs || listed?.data?.tabs || [];
-      beforeIds = new Set(beforeTabs.map((t) => t.tabId));
-      beforeById = new Map(beforeTabs.map((t) => [t.tabId, t.url]));
-    } catch {
-      /* still click */
-    }
-    try {
-      beforeHref = (
-        await evaluateJson(
-          client,
-          `(() => JSON.stringify({ href: location.href }))()`,
-          session,
-        )
-      )?.href;
-    } catch {
-      /* */
-    }
-  }
-
-  const clickResult = unwrap(await client.command("click", { selector }, { session }));
-
-  if (!followNewTab) {
-    return { ok: true, click: clickResult, followedNewTab: false };
-  }
-
-  // Bilibili etc. may open tabs slightly async
-  for (const waitMs of [400, 700, 1000]) {
-    await sleep(waitMs);
-    try {
-      const listed = unwrap(await client.command("list_tabs", {}, { session }));
-      const afterTabs = listed?.tabs || listed?.data?.tabs || [];
-      const created = afterTabs.filter((t) => t.tabId != null && !beforeIds.has(t.tabId));
-      const httpCreated = created.filter((t) => /^https?:/i.test(t.url || ""));
-      const target = httpCreated[httpCreated.length - 1] || created[created.length - 1];
-      if (target?.url && !/^about:|chrome:|edge:/i.test(target.url)) {
-        const { findTabSmart } = await import("./tab-actions.js");
-        const switched = await findTabSmart(client, { url: target.url, session });
-        return {
-          ok: true,
-          click: clickResult,
-          followedNewTab: true,
-          newTab: { tabId: target.tabId, url: target.url, title: target.title },
-          findTab: switched,
-        };
-      }
-      // Same tabId but URL navigated (SPA or full navigation)
-      for (const t of afterTabs) {
-        const prev = beforeById.get(t.tabId);
-        if (prev && t.url && t.url !== prev && /^https?:/i.test(t.url)) {
-          const { findTabSmart } = await import("./tab-actions.js");
-          await findTabSmart(client, { url: t.url, session });
-          return {
-            ok: true,
-            click: clickResult,
-            followedNewTab: false,
-            navigatedSameTab: true,
-            url: t.url,
-          };
-        }
-      }
-      const now = await evaluateJson(
-        client,
-        `(() => JSON.stringify({ href: location.href }))()`,
-        session,
-      );
-      if (beforeHref && now?.href && now.href !== beforeHref) {
-        return {
-          ok: true,
-          click: clickResult,
-          followedNewTab: false,
-          navigatedSameTab: true,
-          url: now.href,
-        };
-      }
-    } catch (err) {
-      if (waitMs >= 1000) {
-        return {
-          ok: true,
-          click: clickResult,
-          followedNewTab: false,
-          followError: err.message,
-          hint: "Click ok; use wb_list_tabs + wb_find_tab if a new tab opened.",
-        };
-      }
-    }
-  }
-
-  return { ok: true, click: clickResult, followedNewTab: false };
+  })()`;
+  return assertOk(await evaluateJson(client, code, session), "scroll");
 }
 
 // ── Wait ──────────────────────────────────────────────────────

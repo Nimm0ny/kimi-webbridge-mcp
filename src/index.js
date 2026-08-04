@@ -13,6 +13,7 @@ import { savePdfSmart, screenshotSmart } from "./capture.js";
 import { formatToolError } from "./errors.js";
 import { formatResult } from "./format.js";
 import {
+  clickSmart,
   consoleCmd,
   dblclick,
   fillForm,
@@ -29,10 +30,12 @@ import {
 } from "./page-actions.js";
 import { findTabSmart } from "./tab-actions.js";
 import { ToolError } from "./errors.js";
+import { isToolEnabled, profileInfo } from "./tool-profile.js";
 import { existsSync } from "node:fs";
 
 const VERSION = packageVersion();
 const client = new WebBridgeClient();
+const profile = profileInfo();
 
 const server = new McpServer(
   {
@@ -41,24 +44,21 @@ const server = new McpServer(
   },
   {
     instructions: [
-      "Kimi WebBridge controls the user's REAL browser (existing logins/cookies) via a local daemon + Chrome/Edge extension.",
-      "Workflow: wb_status → wb_navigate (or wb_find_tab) → wb_snapshot or wb_find → wb_click/wb_fill using @e refs.",
-      "Claude-in-Chrome style helpers: wb_get_text, wb_find, wb_press_key, wb_scroll, wb_wait, wb_console, wb_go_back, wb_go_forward, wb_reload, wb_hover, wb_dblclick, wb_fill_form.",
-      "wb_screenshot defaults to jpeg for reliability; on timeout it auto-retries smaller jpeg. Prefer selector crop for huge pages.",
-      "wb_find_tab fuzzy-matches session URLs; active:true works even when the extension requires a url (resolves via list_tabs).",
-      "Prefer wb_snapshot/wb_find + @eN refs over CSS/JS. Use wb_evaluate/wb_cdp only as escape hatches — never for stealing secrets/cookies.",
-      "Errors return JSON with problem + hint lines — read them before retrying.",
-      "Session = tab group. Per-call session does NOT change the default (use wb_set_session).",
-      "wb_close_session only when the user asks to close agent tabs.",
-      "If extension disconnected: enable Kimi WebBridge in the browser.",
+      "Kimi WebBridge: REAL browser (logins/cookies) via daemon + extension. Compact tool set (Claude-in-Chrome sized).",
+      "Workflow: wb_status → wb_navigate → wb_snapshot|wb_find → wb_click|wb_fill (@e refs). Prefer few tools, not tool spam.",
+      "wb_click follows new tabs opened by the click (session current tab updates). wb_scroll uses DOM roots + CDP wheel for SPA/video pages.",
+      "wb_screenshot defaults to jpeg; retries on timeout. wb_find_tab is path-aware via list_tabs.",
+      "Errors include problem + hint. Escape hatch: wb_evaluate (full profile also has wb_cdp).",
+      "Session via optional session arg (default from env). Close tabs only when user asks.",
+      `Profile: ${profile.profile} (${profile.toolCount} tools). ${profile.note}`,
     ].join("\n"),
   },
 );
 
 function tool(name, description, shape, handler, { preferImage = false } = {}) {
+  if (!isToolEnabled(name)) return;
   server.tool(name, description, shape, async (args) => {
     try {
-      // session is per-call only — do NOT mutate client default
       const result = await handler(args ?? {});
       return formatResult(result, { preferImage });
     } catch (err) {
@@ -70,7 +70,7 @@ function tool(name, description, shape, handler, { preferImage = false } = {}) {
 const sessionOpt = z
   .string()
   .optional()
-  .describe("Per-call session override (does not change default; use wb_set_session for that)");
+  .describe("Per-call session override (does not change the process default)");
 
 // ── Connectivity ──────────────────────────────────────────────
 
@@ -84,6 +84,8 @@ tool(
     return {
       ...ensured.status,
       mcp_version: VERSION,
+      tool_profile: profile.profile,
+      tool_count: profile.toolCount,
       daemon_started_now: ensured.started,
       default_session: client.getSession(),
       ready: Boolean(ensured.status?.running && ensured.status?.extension_connected),
@@ -247,12 +249,19 @@ tool(
 
 tool(
   "wb_click",
-  "Click an element. selector is @e ref from snapshot/find (preferred) or CSS.",
+  "Click an element (@e ref preferred, or CSS). By default, if the click opens a new session tab, switches current tab to it (Bilibili 动态/收藏 style).",
   {
     selector: z.string().min(1).describe("@e ref e.g. @e12 or CSS selector"),
+    followNewTab: z
+      .boolean()
+      .optional()
+      .describe("Follow newly opened session tab after click (default true)"),
     session: sessionOpt,
   },
-  async ({ selector, session }) => client.command("click", { selector }, { session }),
+  async ({ selector, followNewTab, session }) =>
+    clickSmart(client, selector, session, {
+      followNewTab: followNewTab !== false,
+    }),
 );
 
 tool(
@@ -473,5 +482,5 @@ tool(
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error(
-  `[kimi-webbridge-mcp] v${VERSION} ready session=${client.getSession()} url=${process.env.WEBBRIDGE_URL || "http://127.0.0.1:10086"} tools=28 hardened=screenshot,find_tab,errors`,
+  `[kimi-webbridge-mcp] v${VERSION} profile=${profile.profile} tools=${profile.toolCount} session=${client.getSession()}`,
 );
