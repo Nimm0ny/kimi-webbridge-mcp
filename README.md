@@ -25,13 +25,23 @@ Grok Build（或其它 MCP 客户端）
 ## 前置条件
 
 1. Node.js 20+
-2. Kimi WebBridge 已安装，扩展已启用  
+2. Kimi WebBridge 已安装，浏览器扩展一般已启用（装一次即可）  
    - 帮助：[中文](https://www.kimi.com/zh-cn/features/webbridge) · [English](https://www.kimi.com/features/webbridge)
-3. `extension_connected: true`：
+3. **Agent 主动建链**（扩展通常已装好，**不要**默认让用户去点扩展）：
+
+```text
+wb_status  →  MCP ensureDaemon（daemon 未跑则自动 start :10086）
+           →  ready=true 后再 wb_navigate / 业务工具
+```
+
+排障也可手动：
 
 ```powershell
 & "$env:USERPROFILE\.kimi-webbridge\bin\kimi-webbridge.exe" start
+& "$env:USERPROFILE\.kimi-webbridge\bin\kimi-webbridge.exe" status
 ```
+
+详见 Skill `skills/kimi-webbridge/SKILL.md` §0。
 
 ---
 

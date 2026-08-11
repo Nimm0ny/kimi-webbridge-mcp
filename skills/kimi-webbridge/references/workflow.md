@@ -1,5 +1,26 @@
 # Optional workflows
 
+## Agent 主动建链（所有流程之前）
+
+**建链是 Agent 的职责。** 扩展通常已安装；不要默认让用户去点扩展。
+
+```text
+wb_status
+  → MCP ensureDaemon（daemon 未跑则 start）
+  → ready=true  →  wb_navigate / 业务
+  → ready=false → Agent 重试 status（1～3 次）；仍失败再问「浏览器是否打开」
+```
+
+| 现象 | Agent 处理 |
+|------|------------|
+| 未调过 `wb_status` | **先调**，不要假设可用 |
+| `daemon_started_now=true` 且扩展暂 false | **重试** `wb_status`，等扩展挂上 |
+| `running=true` + `extension_connected=true` | 建链完成，可 navigate |
+| 多次仍 extension false | 再请用户确认浏览器/扩展 profile |
+| 中途 command 报 extension | 回 `wb_status` 重建链，勿改 curl |
+
+详见 `SKILL.md` §0。
+
 ## Multi-page research
 
 1. One session for the whole task; `group_title` on first navigate
