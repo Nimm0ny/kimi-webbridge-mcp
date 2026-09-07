@@ -5,12 +5,13 @@ Dedicated directory for kimi-webbridge-mcp development.
 - Repo: https://github.com/Nimm0ny/kimi-webbridge-mcp
 - Grok MCP entry: `D:\py_pj\kimi-webbridge-mcp\src\index.js`
 - Skill source: `skills/kimi-webbridge` (copy to `~\.grok\skills\` after edits)
-- Default tool profile: **compact** (~22 tools). Full extras need `WEBBRIDGE_TOOL_PROFILE=full`.
+- Default tool profile: **compact** (28 tools; full: 32). Full extras need `WEBBRIDGE_TOOL_PROFILE=full`.
 
 ```powershell
 cd D:\py_pj\kimi-webbridge-mcp
 npm run doctor
 npm run smoke
+npm test
 # After skill edits:
 Copy-Item -Recurse -Force skills\kimi-webbridge\* $env:USERPROFILE\.grok\skills\kimi-webbridge\
 ```

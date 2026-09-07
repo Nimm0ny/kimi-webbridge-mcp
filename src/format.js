@@ -15,19 +15,24 @@ export function formatResult(result, { preferImage = false } = {}) {
 
   const failed =
     (typeof result === "object" && result !== null && result.ok === false) ||
-    (typeof result === "object" && result !== null && result.success === false);
+    (typeof result === "object" && result !== null && result.success === false) ||
+    result?.data?.ok === false || result?.data?.success === false;
 
   const content = [];
-  const path = typeof result === "object" && result && typeof result.path === "string" ? result.path : null;
+  const originalArtifact = result?.data && typeof result.data === "object" ? result.data : result;
+  const artifact = originalArtifact?.preview || originalArtifact;
+  const path = typeof artifact?.path === "string" ? artifact.path : null;
   const mime =
     typeof result === "object" && result
-      ? result.mimeType || guessMime(path, result.format)
+      ? artifact.mimeType || guessMime(path, artifact.format)
       : undefined;
 
   let embedded = false;
+  let skippedReason = !preferImage ? "not_requested" : !path ? "missing_path" : !existsSync(path) ? "file_missing" : "unsupported_mime";
   if (preferImage && path && existsSync(path) && mime?.startsWith("image/")) {
     try {
       const size = statSync(path).size;
+      skippedReason = "over_size_cap";
       if (size <= MAX_EMBED_BYTES) {
         const buf = readFileSync(path);
         content.push({
@@ -38,7 +43,7 @@ export function formatResult(result, { preferImage = false } = {}) {
         embedded = true;
       }
     } catch {
-      // path-only fallback
+      skippedReason = "file_read_failed";
     }
   }
 
@@ -48,7 +53,7 @@ export function formatResult(result, { preferImage = false } = {}) {
       : JSON.stringify(
           embedded || !path
             ? result
-            : { ...result, imageEmbedded: embedded, imageSkippedReason: embedded ? undefined : "over_size_cap" },
+            : { ...result, imageEmbedded: embedded, imageSkippedReason: skippedReason },
           null,
           2,
         );

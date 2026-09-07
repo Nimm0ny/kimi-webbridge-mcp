@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>WebBridge actions regression</title>
+<style>body{font:18px system-ui;padding:30px}button,input,select{padding:8px;margin:8px}#hover:hover{background:rgb(255,0,0)}#container{height:80px;overflow:auto;border:1px solid}#container div{height:400px}</style>
+<label for="name">姓名</label><input id="name">
+<label><input id="agree" type="checkbox">同意</label>
+<select id="choice"><option value="a">A</option><option value="b">B</option></select>
+<section id="other"><button>保存</button></section>
+<section id="main"><button onclick="document.querySelector('#out').textContent='saved:'+document.querySelector('#name').value">保存</button></section>
+<button id="hover">Hover</button><button id="double" ondblclick="document.querySelector('#double-out').textContent='double:'+event.isTrusted">Double</button>
+<p id="out"></p><p id="double-out"></p><div id="container"><div>Scrollable fixture</div></div>
+<script>window.testEvents=[];for(const type of ['mousemove','mousedown','mouseup','click'])document.addEventListener(type,e=>testEvents.push({type,id:e.target.id,x:e.clientX,y:e.clientY,trusted:e.isTrusted}));</script>
+</html>

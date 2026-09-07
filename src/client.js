@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
+import { ToolError } from "./errors.js";
 
 const require = createRequire(import.meta.url);
 const PKG_VERSION = require("../package.json").version;
@@ -90,7 +91,7 @@ export class WebBridgeClient {
 
   async ensureDaemon({ startIfNeeded = true } = {}) {
     try {
-      const s = await this.status({ force: true });
+      const s = await this.status();
       return { ok: true, started: false, status: s };
     } catch (err) {
       if (!startIfNeeded) throw err;
@@ -136,6 +137,7 @@ export class WebBridgeClient {
   }
 
   async command(action, args = {}, { session, requireExtension = true, timeoutMs } = {}) {
+    const deadline = Date.now() + (Number(timeoutMs) > 0 ? Number(timeoutMs) : this.timeoutMs);
     const ensured = await this.ensureDaemon();
     if (requireExtension) {
       // Reuse status from ensure when fresh; otherwise one cached/forced check
@@ -162,7 +164,11 @@ export class WebBridgeClient {
       session: this.resolveSession(session),
     };
 
-    return this.#post("/command", body, timeoutMs);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new ToolError("Connection preparation exhausted the command budget", {
+      code: "preflight_timeout", detail: { action, outcome: "not_sent" }, hint: "Check wb_status before retrying.",
+    });
+    return this.#post("/command", body, remaining);
   }
 
   async #get(path) {
@@ -225,14 +231,17 @@ export class WebBridgeClient {
         const e = data.error || data.message || data;
         throw new Error(typeof e === "string" ? e : e?.message || JSON.stringify(e));
       }
-      if (data?.data && data.data.ok === false) {
+      if (data?.data && (data.data.ok === false || data.data.success === false)) {
         const e = data.data.error || data.data.message || data.data;
         throw new Error(typeof e === "string" ? e : e?.message || JSON.stringify(e));
       }
       return data;
     } catch (err) {
       if (err?.name === "AbortError") {
-        throw new Error(`POST ${path} timed out after ${limit}ms (action=${body?.action || "?"})`);
+        throw new ToolError(`Command timed out after ${limit}ms`, {
+          code: "outcome_unknown", detail: { action: body?.action, outcome: "unknown" },
+          hint: "The bridge may still execute the command. Inspect the page before retrying; do not repeat submissions automatically.",
+        });
       }
       if (err?.cause?.code === "ECONNREFUSED" || /fetch failed|ECONNREFUSED/i.test(String(err?.message))) {
         this.invalidateStatusCache();

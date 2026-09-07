@@ -1,6 +1,6 @@
 /**
  * Tool surface profiles.
- * Default `compact` ≈ Claude-in-Chrome size/quality (stable, no tool bloat).
+ * Default `compact` includes everyday strict page operations.
  * `full` keeps power-user extras (cdp, pdf, hover, form, sessions, …).
  *
  * Single source of truth for tool counts — import expectedToolCount() everywhere.
@@ -36,13 +36,17 @@ export const COMPACT_TOOLS = new Set([
   "wb_network",
   "wb_console",
   "wb_upload",
+  "wb_hover",
+  "wb_dblclick",
+  "wb_type",
+  "wb_select",
+  "wb_check",
+  "wb_drag",
 ]);
 
 /** Extra tools only in full profile */
 export const FULL_ONLY_TOOLS = new Set([
   "wb_set_session",
-  "wb_dblclick",
-  "wb_hover",
   "wb_fill_form",
   "wb_cdp",
   "wb_save_as_pdf",
@@ -73,13 +77,12 @@ export function profileInfo() {
     compactCount: COMPACT_TOOLS.size,
     fullOnlyCount: FULL_ONLY_TOOLS.size,
     note: full
-      ? "Full surface including cdp/pdf/hover/form extras."
-      : "Compact Claude-in-Chrome style surface. Set WEBBRIDGE_TOOL_PROFILE=full for extras.",
+      ? "Full surface including cdp/pdf/form/session extras."
+      : "Compact page operations. Set WEBBRIDGE_TOOL_PROFILE=full for cdp/pdf/form/session extras.",
   };
 }
 
-/** Whether click may borrow the browser's focused tab outside the session group. */
+/** Deprecated compatibility export: automatic active-tab borrowing is disabled. */
 export function allowBorrowActiveTab() {
-  const v = String(process.env.WEBBRIDGE_CLICK_BORROW_ACTIVE || "0").trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes" || v === "on";
+  return false;
 }

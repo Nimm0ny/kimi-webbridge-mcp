@@ -19,11 +19,7 @@ console.log("tool_profile:", info.profile);
 console.log("expected_tools:", expectedToolCount());
 console.log("compact_tools:", info.compactCount, "full_only:", info.fullOnlyCount);
 console.log("binary:", daemonBinaryPath(), existsSync(daemonBinaryPath()) ? "OK" : "MISSING");
-console.log(
-  "click_borrow_active:",
-  String(process.env.WEBBRIDGE_CLICK_BORROW_ACTIVE || "0"),
-  "(set 1 only if sites open tabs outside the agent group)",
-);
+console.log("input: auto (CDP for visible tabs, DOM click for hidden tabs); native tab-ID routing unavailable");
 
 const skillPath = join(homedir(), ".grok", "skills", "kimi-webbridge", "SKILL.md");
 console.log("grok_skill:", skillPath, existsSync(skillPath) ? "OK" : "MISSING (optional)");
@@ -32,6 +28,7 @@ try {
   const ensured = await client.ensureDaemon();
   console.log("daemon:", ensured.started ? "started" : "already running");
   console.log("status:", JSON.stringify(ensured.status, null, 2));
+  if (ensured.status?.version_mismatch) console.log("NOTE: daemon/extension version mismatch reported; run smoke:e2e to check compatibility.");
   if (!ensured.status?.extension_connected) {
     console.log("\nWARNING: extension not connected.");
     console.log("Open Chrome/Edge with Kimi WebBridge extension enabled.");

@@ -15,12 +15,10 @@ import { formatResult } from "./format.js";
 import {
   clickSmart,
   consoleCmd,
-  dblclick,
   fillForm,
   getPageText,
   goBack,
   goForward,
-  hoverSmart,
   pressKey,
   reload,
   scroll,
@@ -32,10 +30,14 @@ import { findTabSmart } from "./tab-actions.js";
 import { ToolError } from "./errors.js";
 import { isToolEnabled, profileInfo } from "./tool-profile.js";
 import { existsSync } from "node:fs";
+import { isAbsolute } from "node:path";
+import { interact, snapshotWithTargets, drag } from "./targets.js";
+import { OperationQueue } from "./operation-queue.js";
 
 const VERSION = packageVersion();
 const client = new WebBridgeClient();
 const profile = profileInfo();
+const operations = new OperationQueue();
 
 const server = new McpServer(
   {
@@ -46,7 +48,8 @@ const server = new McpServer(
     instructions: [
       "Kimi WebBridge: REAL browser (logins/cookies) via daemon + extension. Compact tool set (Claude-in-Chrome sized).",
       "Workflow: wb_status → wb_navigate → wb_snapshot|wb_find → wb_click|wb_fill (@e refs). Prefer few tools, not tool spam.",
-      "wb_click follows new tabs opened by the click (session current tab updates). wb_scroll uses DOM roots + CDP wheel for SPA/video pages.",
+      "Actions use strict targets. Auto pointer input uses CDP on visible tabs and DOM on hidden tabs; returned mode is authoritative. Snapshot refs bind observed nodes; stale/ambiguous refs fail.",
+      "wb_click only follows a unique new session tab with a verified opener relationship. Inspect candidates otherwise. outcome=dispatched is not verified success.",
       "wb_screenshot defaults to jpeg; retries on timeout. wb_find_tab is path-aware via list_tabs.",
       "Errors include problem + hint. Escape hatch: wb_evaluate (full profile also has wb_cdp).",
       "Session via optional session arg (default from env). Close tabs only when user asks.",
@@ -57,20 +60,56 @@ const server = new McpServer(
 
 function tool(name, description, shape, handler, { preferImage = false } = {}) {
   if (!isToolEnabled(name)) return;
-  server.tool(name, description, shape, async (args) => {
+  server.tool(name, description, shape, async (args) => operations.run(async () => {
     try {
       const result = await handler(args ?? {});
       return formatResult(result, { preferImage });
     } catch (err) {
       return formatToolError(err, { tool: name });
     }
-  });
+  }));
 }
 
 const sessionOpt = z
   .string()
   .optional()
   .describe("Per-call session override (does not change the process default)");
+
+const targetSchema = z.object({
+  css: z.string().min(1).optional(),
+  role: z.string().min(1).optional(),
+  name: z.string().optional(),
+  exact: z.boolean().optional(),
+  within: z.string().min(1).optional().describe("Unique CSS container, including open shadow roots"),
+  ref: z.string().regex(/^@e/).optional(),
+  snapshotId: z.string().optional(),
+}).strict().refine(t => Boolean(t.css || t.role || t.name != null || t.ref), "Provide css, role/name or ref")
+  .refine(t => !t.ref || (!t.css && !t.role && t.name == null && !t.within), "ref cannot be combined with another locator");
+const actionShape = {
+  selector: z.string().min(1).optional().describe("Legacy CSS or @e reference; use selector OR target"),
+  target: targetSchema.optional(),
+  timeoutMs: z.number().int().min(100).max(120000).optional(),
+  inputMode: z.enum(["auto", "cdp", "dom"]).optional().describe("Click/check/double-click: auto uses DOM in hidden tabs, CDP in visible tabs. Never retries uncertain input."),
+  session: sessionOpt,
+};
+function actionTarget(args) {
+  if (Boolean(args.selector) === Boolean(args.target)) throw new ToolError("Provide exactly one of selector or target", { code: "target_args" });
+  return args.target || args.selector;
+}
+const expectSchema = z.object({
+  text: z.string().optional(), selector: z.string().min(1).optional(), url: z.string().url().optional(),
+  state: z.enum(["visible", "hidden", "attached", "detached", "enabled"]).optional(),
+}).strict().refine(e => e.text != null || e.selector || e.url, "Expectation needs text, selector or url");
+
+async function verifyExpected(result, expect, timeoutMs, session) {
+  if (!expect) return result;
+  try {
+    const observation = await waitFor(client, { ...expect, timeoutMs: timeoutMs ?? 10000 }, session);
+    return { ...result, verified: true, outcome: "verified", observation };
+  } catch (err) {
+    throw new ToolError("Action dispatched but expectation was not met", { code: "verification_failed", detail: { action: result, error: err.message }, hint: "Inspect the page before repeating the action." });
+  }
+}
 
 // ── Connectivity ──────────────────────────────────────────────
 
@@ -88,6 +127,15 @@ tool(
       tool_count: profile.toolCount,
       daemon_started_now: ensured.started,
       default_session: client.getSession(),
+      capabilities: {
+        strict_targets: "implemented", trusted_input: "requires_bridge_cdp",
+        open_shadow_roots: "implemented", snapshot_refs: "bound_top_document_nodes",
+        native_tab_id_selection: "unsupported_by_adapter; unique URL compatibility only",
+        cross_origin_frames: "requires_bridge_target_routing", closed_shadow_roots: "unsupported",
+        browser_windows: "requires_extension_api", download_events: "requires_extension_api",
+        coordinate_input: "not_exposed; element-based CDP input available",
+        events: "polling; no daemon event subscription", upstream: ensured.status?.capabilities ?? null,
+      },
       ready: Boolean(ensured.status?.running && ensured.status?.extension_connected),
       hint: ensured.status?.extension_connected
         ? "Ready. Use wb_navigate or wb_find_tab."
@@ -153,13 +201,14 @@ tool(
 
 tool(
   "wb_find_tab",
-  "Select a tab as current. URL match is fuzzy within the session (trailing slash/query tolerant). active:true borrows the focused session tab when possible.",
+  "Select a session tab by exact URL or tabId resolved to unique URL. Never navigates on failure. Duplicate URLs require upstream ID support.",
   {
-    url: z.string().optional().describe("URL of a session-owned tab (exact or fuzzy)"),
+    url: z.string().optional().describe("Exact URL of a session-owned tab from wb_list_tabs"),
     active: z.boolean().optional().describe("Prefer the active/focused tab in this session"),
+    tabId: z.number().int().optional(),
     session: sessionOpt,
   },
-  async ({ url, active, session }) => findTabSmart(client, { url, active, session }),
+  async ({ url, active, tabId, session }) => findTabSmart(client, { url, active, tabId, session }),
 );
 
 tool(
@@ -189,7 +238,7 @@ tool(
   "wb_snapshot",
   "Accessibility tree with @e refs (like Claude read_page). Prefer before click/fill.",
   { session: sessionOpt },
-  async ({ session }) => client.command("snapshot", {}, { session }),
+  async ({ session }) => snapshotWithTargets(client, session),
 );
 
 tool(
@@ -218,16 +267,20 @@ tool(
         hint: 'Example: { query: "登录" } or { role: "link", query: "动态" }.',
       });
     }
-    const snap = unwrap(await client.command("snapshot", {}, { session }));
+    const snap = await snapshotWithTargets(client, session);
     const tree = snap?.tree ?? snap;
-    const matches = searchSnapshot(tree, { query, role, limit: limit ?? 20 });
+    const unresolved = new Map((snap.unresolvedRefs || []).map(item => [item.ref, item.code]));
+    const matches = searchSnapshot(tree, { query, role, limit: limit ?? 20 }).map(match => ({
+      ...match, refBound: Boolean(match.ref) && !unresolved.has(match.ref), refError: unresolved.get(match.ref),
+    }));
     return {
       ok: true,
       url: snap?.url,
       title: snap?.title,
       count: matches.length,
       matches,
-      hint: matches.some((m) => m.ref)
+      snapshotId: snap.snapshotId,
+      hint: matches.some((m) => m.refBound)
         ? "Use wb_click/wb_fill with a match.ref (e.g. @e1)."
         : "No @e refs in matches; try wb_snapshot or CSS via wb_evaluate.",
     };
@@ -240,63 +293,69 @@ tool(
   {
     text: z.string().optional().describe("Substring to wait for in document.body.innerText"),
     selector: z.string().optional().describe("CSS selector to wait for"),
+    url: z.string().url().optional().describe("Exact expected URL"),
+    state: z.enum(["visible", "hidden", "attached", "detached", "enabled"]).optional().describe("Selector state; default visible. Multiple conditions use AND."),
     timeoutMs: z.number().int().min(100).max(120000).optional().describe("Timeout ms (default 15000)"),
     intervalMs: z.number().int().min(50).max(5000).optional().describe("Poll interval ms (default 400)"),
     session: sessionOpt,
   },
-  async ({ text, selector, timeoutMs, intervalMs, session }) =>
-    waitFor(client, { text, selector, timeoutMs, intervalMs }, session),
+  async ({ text, selector, url, state, timeoutMs, intervalMs, session }) =>
+    waitFor(client, { text, selector, url, state, timeoutMs, intervalMs }, session),
 );
 
 // ── Interact ──────────────────────────────────────────────────
 
 tool(
   "wb_click",
-  "Click an element (@e ref preferred, or CSS). By default, if the click opens a new session tab, switches current tab to it (Bilibili 动态/收藏 style).",
+  "Click a unique actionable target. Auto uses CDP in visible tabs, DOM in hidden tabs. Optional expect verifies the result. Auto-follow requires opener evidence.",
   {
-    selector: z.string().min(1).describe("@e ref e.g. @e12 or CSS selector"),
+    ...actionShape,
+    button: z.enum(["left", "right", "middle"]).optional(),
+    expect: expectSchema.optional(),
+    followTimeoutMs: z.number().int().min(100).max(10000).optional(),
     followNewTab: z
       .boolean()
       .optional()
       .describe("Follow newly opened session tab after click (default true)"),
     session: sessionOpt,
   },
-  async ({ selector, followNewTab, session }) =>
-    clickSmart(client, selector, session, {
-      followNewTab: followNewTab !== false,
-    }),
+  async (args) => verifyExpected(await clickSmart(client, actionTarget(args), args.session, args), args.expect, args.timeoutMs, args.session),
 );
 
 tool(
   "wb_dblclick",
-  "Double-click an element (@e or CSS). Dispatches real dblclick DOM events (not two separate clicks).",
-  {
-    selector: z.string().min(1),
-    session: sessionOpt,
-  },
-  async ({ selector, session }) => dblclick(client, selector, session),
+  "Double-click a unique actionable element. Auto uses CDP on visible tabs and synthetic DOM input on hidden tabs; mode is reported.",
+  { ...actionShape, expect: expectSchema.optional() },
+  async args => verifyExpected(await interact(client, "dblclick", actionTarget(args), args, args.session), args.expect, args.timeoutMs, args.session),
 );
 
 tool(
   "wb_hover",
   "Hover/mouseover an element (@e or CSS). Useful for menus and tooltips.",
-  {
-    selector: z.string().min(1),
-    session: sessionOpt,
-  },
-  async ({ selector, session }) => hoverSmart(client, selector, session),
+  { ...actionShape, expect: expectSchema.optional() },
+  async args => verifyExpected(await interact(client, "hover", actionTarget(args), args, args.session), args.expect, args.timeoutMs, args.session),
 );
 
 tool(
   "wb_fill",
   "Clear-and-fill input/textarea/contenteditable. selector = @e or CSS.",
   {
-    selector: z.string().min(1),
+    ...actionShape,
     value: z.string().describe("Text to insert (replaces existing)"),
     session: sessionOpt,
   },
-  async ({ selector, value, session }) => client.command("fill", { selector, value }, { session }),
+  async args => interact(client, "fill", actionTarget(args), args, args.session),
 );
+
+tool("wb_type", "Insert text at the target's caret without replacing existing text, via CDP. Verify the result separately.",
+  { ...actionShape, value: z.string() }, async args => interact(client, "type", actionTarget(args), args, args.session));
+tool("wb_select", "Set native select option values and verify selection. Does not support custom dropdown widgets.",
+  { ...actionShape, values: z.array(z.string()).max(100) }, async args => interact(client, "select", actionTarget(args), args, args.session));
+tool("wb_check", "Set checkbox/radio state idempotently and verify it. Does not blindly toggle.",
+  { ...actionShape, checked: z.boolean() }, async args => interact(client, "check", actionTarget(args), args, args.session));
+tool("wb_drag", "Pointer drag between two unique elements using CDP. Requires both targets visible together; HTML5 DataTransfer is not synthesized.",
+  { source: targetSchema, destination: targetSchema, steps: z.number().int().min(2).max(60).optional(), timeoutMs: actionShape.timeoutMs, expect: expectSchema.optional(), session: sessionOpt },
+  async args => verifyExpected(await drag(client, args.source, args.destination, args, args.session), args.expect, args.timeoutMs, args.session));
 
 tool(
   "wb_fill_form",
@@ -305,11 +364,13 @@ tool(
     fields: z
       .array(
         z.object({
-          selector: z.string().min(1).describe("@e ref or CSS"),
+          selector: z.string().min(1).optional().describe("@e ref or CSS; provide selector OR target"),
+          target: targetSchema.optional(),
           value: z.union([z.string(), z.number(), z.boolean()]).describe("Value to fill"),
-        }),
+        }).refine(f => Boolean(f.selector) !== Boolean(f.target), "Provide selector OR target"),
       )
       .min(1)
+      .max(100)
       .describe("Ordered list of fields to fill"),
     session: sessionOpt,
   },
@@ -334,14 +395,17 @@ tool(
   "Scroll page or element into view. direction: up|down|left|right, or x/y deltas, or selector/@e into view.",
   {
     selector: z.string().optional().describe("@e ref or CSS to scrollIntoView"),
+    container: z.string().optional().describe("Unique CSS container to scrollBy; defaults to document.scrollingElement"),
     direction: z.enum(["up", "down", "left", "right"]).optional(),
     amount: z.number().optional().describe("Pixels for direction scroll (default 600)"),
     x: z.number().optional().describe("Horizontal scrollBy delta"),
     y: z.number().optional().describe("Vertical scrollBy delta"),
     session: sessionOpt,
   },
-  async ({ selector, direction, amount, x, y, session }) =>
-    scroll(client, { selector, direction, amount, x, y }, session),
+  async ({ selector, container, direction, amount, x, y, session }) => {
+    if (selector && container) throw new ToolError("Use selector for scrollIntoView OR container for scrollBy", { code: "scroll_args" });
+    return scroll(client, { selector, container, direction, amount, x, y }, session);
+  },
 );
 
 tool(
@@ -370,20 +434,22 @@ tool(
 
 tool(
   "wb_screenshot",
-  "Screenshot current tab (or selector). Default format=jpeg for reliability; auto-retries smaller jpeg on timeout. Returns path; embeds image when under size cap. Errors include problem+hint.",
+  "Screenshot current tab (or selector), with bounded retries and image preview. Original file is preserved; oversized images get resized JPEG previews with dimensions.",
   {
     format: z.enum(["png", "jpeg"]).optional().describe("Default jpeg (faster/more reliable than png)"),
     quality: z.number().int().min(0).max(100).optional().describe("JPEG quality; default 55"),
     selector: z.string().optional().describe("Optional @e/CSS crop — use for large pages"),
     path: z.string().optional(),
+    timeoutMs: z.number().int().min(1000).max(120000).optional().describe("Capture retry budget; default 60000 ms"),
     session: sessionOpt,
   },
-  async ({ format, quality, selector, path, session }) => {
+  async ({ format, quality, selector, path, timeoutMs, session }) => {
     const args = {};
     if (format) args.format = format;
     if (quality != null) args.quality = quality;
     if (selector) args.selector = selector;
     if (path) args.path = path;
+    if (timeoutMs != null) args.timeoutMs = timeoutMs;
     return screenshotSmart(client, args, session);
   },
   { preferImage: true },
@@ -463,6 +529,7 @@ tool(
           hint: "Check the absolute path on disk before wb_upload.",
         });
       }
+      if (!isAbsolute(f)) throw new ToolError("Upload requires absolute paths", { code: "upload_bad_path", detail: f });
     }
     // Quick page diagnostics if element likely missing
     try {

@@ -54,4 +54,14 @@ wb_status
 
 ## Full-profile only
 
-Tools like `wb_cdp`, `wb_hover`, `wb_fill_form`, `wb_save_as_pdf` require `WEBBRIDGE_TOOL_PROFILE=full`.
+Tools like `wb_cdp`, `wb_set_session`, `wb_fill_form`, `wb_save_as_pdf` require `WEBBRIDGE_TOOL_PROFILE=full`.
+
+## 1.3 严格操作流程
+
+- selector 与 target 二选一；target 支持 css 或 role/name/within。不要在 ambiguous_target 时猜候选。
+- wb_snapshot/wb_find 后推荐使用 target.ref + snapshotId；旧引用失效则重新观察。
+- click/check/dblclick 的 inputMode=auto 在可见页用 CDP、后台页用 DOM；mode 会如实返回。要求可信输入时显式 inputMode=cdp，并让目标标签可见。
+- wb_fill/wb_check/wb_select 自动验证状态；click 等传 expect 或随后观察页面，不能把 verified=false 当任务成功。
+- outcome_unknown 表示可能已执行；先检查页面，再决定是否重试，避免重复提交。
+- wb_scroll 的 container 指定滚动容器；moved=null 表示仅发出滚轮，尚未验证位移。
+- compact 28 工具，含 hover/dblclick/type/select/check/drag；full 32 工具。跨域 iframe、窗口管理、下载事件及原生 ID 路由尚未实现，查看 wb_status.capabilities。

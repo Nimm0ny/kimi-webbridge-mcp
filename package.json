@@ -1,6 +1,6 @@
 {
   "name": "kimi-webbridge-mcp",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Compact MCP + thin Skill for Kimi WebBridge (Claude-in-Chrome sized tool surface)",
   "type": "module",
   "private": false,
@@ -11,12 +11,16 @@
   "main": "./src/index.js",
   "files": [
     "src/**/*.js",
+    "src/**/*.mjs",
     "skills/**/*",
     "fixtures/**/*",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:unit": "node --test tests/unit.test.mjs",
+    "test:browser": "node --test tests/browser.test.mjs",
     "start": "node src/index.js",
     "doctor": "node src/doctor.js",
     "smoke": "node src/smoke-list.mjs",
@@ -24,7 +28,7 @@
     "smoke:e2e": "node src/smoke-align.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.9.0"
   },
   "keywords": [
     "mcp",
@@ -46,6 +50,10 @@
   "homepage": "https://github.com/Nimm0ny/kimi-webbridge-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
+    "sharp": "^0.35.4",
     "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
   }
 }

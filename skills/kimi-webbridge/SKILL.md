@@ -12,7 +12,7 @@ description: |
   Proceed when ready=true (running + extension_connected). Only if still offline after Agent retries, ask user
   whether the browser is open.
 metadata:
-  version: "1.2.3"
+  version: "1.3.0"
   mcp: kimi-webbridge
 ---
 
@@ -133,7 +133,17 @@ wb_status                         # Agent 主动建链（ensureDaemon）
 
 ## Notes
 
-- **New tab after click**: `wb_click` 跟随 **本 session 组内** 新标签。
-- **find_tab**: 完整 path URL，非裸 host。
-- **Extras**（cdp/pdf/hover/form）: `WEBBRIDGE_TOOL_PROFILE=full`。
+- **New tab after click**: 只有唯一 openerTabId 关联的新标签才自动跟随，否则查看 newTabCandidates 后显式选择。
+- **find_tab**: 使用列表中的精确 URL 或 tabId（通过唯一 URL 兼容选择）。重复 URL/选错页会报错，不会通过导航兜底。
+- **Extras**（cdp/pdf/form/set_session）: `WEBBRIDGE_TOOL_PROFILE=full`。
 - **OA / 运维**: 先 §0 建链 → `wb_navigate` OA → 登录态不足再请用户登录；`tools/fetch_oa_readonly.py` 等同理依赖已连上的 WebBridge。
+
+## 1.3 严格操作流程
+
+- selector 与 target 二选一；target 支持 css 或 role/name/within。不要在 ambiguous_target 时猜候选。
+- wb_snapshot/wb_find 后推荐使用 target.ref + snapshotId；旧引用失效则重新观察。
+- click/check/dblclick 的 inputMode=auto 在可见页用 CDP、后台页用 DOM；mode 会如实返回。要求可信输入时显式 inputMode=cdp，并让目标标签可见。
+- wb_fill/wb_check/wb_select 自动验证状态；click 等传 expect 或随后观察页面，不能把 verified=false 当任务成功。
+- outcome_unknown 表示可能已执行；先检查页面，再决定是否重试，避免重复提交。
+- wb_scroll 的 container 指定滚动容器；moved=null 表示仅发出滚轮，尚未验证位移。
+- compact 28 工具，含 hover/dblclick/type/select/check/drag；full 32 工具。跨域 iframe、窗口管理、下载事件及原生 ID 路由尚未实现，查看 wb_status.capabilities。

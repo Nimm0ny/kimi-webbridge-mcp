@@ -4,6 +4,7 @@
  */
 
 import { ToolError } from "./errors.js";
+import { interact, prepareTarget, runTarget } from "./targets.js";
 // ToolError used by scroll CDP fallback
 
 export function unwrap(result) {
@@ -20,12 +21,12 @@ export function assertOk(result, label = "action") {
   return result;
 }
 
-export async function evaluateRaw(client, code, session) {
-  return unwrap(await client.command("evaluate", { code }, { session }));
+export async function evaluateRaw(client, code, session, timeoutMs) {
+  return unwrap(await client.command("evaluate", { code }, { session, timeoutMs }));
 }
 
-export async function evaluateJson(client, code, session) {
-  const data = await evaluateRaw(client, code, session);
+export async function evaluateJson(client, code, session, timeoutMs) {
+  const data = await evaluateRaw(client, code, session, timeoutMs);
   const value = data?.value !== undefined ? data.value : data;
   if (typeof value === "string") {
     try {
@@ -108,74 +109,6 @@ export function findRefMeta(tree, ref) {
   return { ref, name: target.name || "", role: target.role || "" };
 }
 
-/** DOM finder script body: exact name+role first, then exact name, then startsWith — never loose includes-only first. */
-function domResolveScript(meta, selector) {
-  return `(() => {
-    const name = ${JSON.stringify(meta?.name || "")}.trim();
-    const role = ${JSON.stringify(meta?.role || "")}.trim().toLowerCase();
-    const sel = ${JSON.stringify(selector)};
-    const roleTags = {
-      link: ["a"],
-      button: ["button", "input", "summary"],
-      textbox: ["input", "textarea"],
-      searchbox: ["input"],
-      checkbox: ["input"],
-      radio: ["input"],
-      combobox: ["select", "input"],
-      listbox: ["select"],
-      heading: ["h1", "h2", "h3", "h4", "h5", "h6"],
-      img: ["img"],
-      image: ["img"],
-    };
-    // Prefer interactive candidates when role is interactive
-    const interactiveSel = "a,button,input,textarea,select,summary,label,[role],[tabindex],[onclick]";
-    const broadSel = interactiveSel + ",h1,h2,h3,h4,h5,h6,p,li,div,span";
-    const preferInteractive = ["link", "button", "textbox", "searchbox", "checkbox", "radio", "combobox"].includes(role);
-    const candidates = Array.from(document.querySelectorAll(preferInteractive ? interactiveSel : broadSel));
-    function labelOf(n) {
-      return (n.getAttribute("aria-label") || n.innerText || n.textContent || n.value || n.alt || "").replace(/\\s+/g, " ").trim();
-    }
-    function roleMatch(n) {
-      if (!role) return true;
-      const ar = (n.getAttribute("role") || "").toLowerCase();
-      if (ar === role) return true;
-      const tags = roleTags[role];
-      if (tags && tags.includes(n.tagName.toLowerCase())) {
-        if (role === "link") return n.tagName.toLowerCase() === "a" && n.hasAttribute("href");
-        return true;
-      }
-      return false;
-    }
-    let el = null;
-    if (!sel.startsWith("@e")) {
-      el = document.querySelector(sel);
-    } else {
-      if (name && role) {
-        el = candidates.find((n) => labelOf(n) === name && roleMatch(n));
-      }
-      if (!el && name) {
-        const exact = candidates.filter((n) => labelOf(n) === name && roleMatch(n));
-        if (exact.length === 1) el = exact[0];
-        else if (exact.length > 1 && preferInteractive) el = exact[0];
-      }
-      if (!el && name) {
-        const exactAny = candidates.filter((n) => labelOf(n) === name);
-        if (exactAny.length === 1) el = exactAny[0];
-      }
-      if (!el && name && name.length >= 2) {
-        const hits = candidates.filter((n) => roleMatch(n) && labelOf(n).includes(name));
-        if (hits.length === 1) el = hits[0];
-        else if (hits.length > 1) {
-          // Prefer shortest label (tightest match) among role-matched
-          hits.sort((a, b) => labelOf(a).length - labelOf(b).length);
-          el = hits[0];
-        }
-      }
-    }
-    return el;
-  })()`;
-}
-
 // ── Keyboard ──────────────────────────────────────────────────
 
 const KEY_TABLE = {
@@ -231,359 +164,113 @@ export async function pressKey(client, keyStr, session) {
       key: info.key,
       modifiers,
     };
-    await cdp(client, "Input.dispatchKeyEvent", { type: "keyDown", ...base, text: info.text }, session);
+    await cdp(client, "Input.dispatchKeyEvent", { type: "keyDown", ...base, text: (info.ctrl || info.meta || info.alt) ? undefined : info.text }, session);
     await cdp(client, "Input.dispatchKeyEvent", { type: "keyUp", ...base }, session);
     return { ok: true, key: info.key, mode: "cdp" };
-  } catch (cdpErr) {
-    const code = `(() => {
-      const t = document.activeElement || document.body;
-      const opts = {
-        key: ${JSON.stringify(info.key)},
-        code: ${JSON.stringify(info.code)},
-        keyCode: ${info.keyCode},
-        which: ${info.keyCode},
-        bubbles: true,
-        cancelable: true,
-        altKey: ${info.alt},
-        ctrlKey: ${info.ctrl},
-        metaKey: ${info.meta},
-        shiftKey: ${info.shift},
-      };
-      for (const type of ["keydown", "keypress", "keyup"]) {
-        t.dispatchEvent(new KeyboardEvent(type, opts));
-      }
-      if (${JSON.stringify(info.key)} === "Enter" && t.form && typeof t.form.requestSubmit === "function") {
-        try { t.form.requestSubmit(); } catch (_) {}
-      }
-      return JSON.stringify({ ok: true, key: ${JSON.stringify(info.key)}, target: t.tagName, mode: "dom", cdpError: ${JSON.stringify(String(cdpErr.message || cdpErr))} });
-    })()`;
-    return assertOk(await evaluateJson(client, code, session), "press_key");
+  } catch (err) {
+    throw new ToolError("Keyboard input failed; no synthetic fallback was sent", {
+      code: "outcome_unknown", detail: err.message,
+      hint: "Inspect focus and page state before retrying the key.",
+    });
   }
 }
 
 // ── Scroll ────────────────────────────────────────────────────
 
-export async function scroll(client, { selector, direction, amount, x, y }, session) {
-  if (selector && selector.startsWith("@e")) {
-    const snap = unwrap(await client.command("snapshot", {}, { session }));
-    const meta = findRefMeta(snap?.tree ?? snap, selector);
-    if (!meta) throw new Error(`ref ${selector} not in snapshot; call wb_snapshot first`);
-    const code = `(() => {
-      const el = ${domResolveScript(meta, selector)};
-      if (!el) return JSON.stringify({ ok: false, error: "could not map ref to unique DOM node", ref: ${JSON.stringify(selector)}, name: ${JSON.stringify(meta.name)}, role: ${JSON.stringify(meta.role)} });
-      el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-      return JSON.stringify({ ok: true, mode: "intoView", selector: ${JSON.stringify(selector)}, tag: el.tagName });
-    })()`;
-    return assertOk(await evaluateJson(client, code, session), "scroll");
+export async function scroll(client, { selector, container, direction, amount, x, y }, session) {
+  if (selector) {
+    const bound = await prepareTarget(client, selector, session, { pointer: false, requireEnabled: false });
+    if (!bound.retained) await runTarget(client, { op: "release", handle: bound.handle }, session);
+    return { ok: true, mode: "intoView", verified: true, visible: bound.visible, target: { role: bound.role, name: bound.name } };
   }
-
   const amt = Number(amount ?? 600);
   const dx = x != null ? Number(x) : direction === "left" ? -amt : direction === "right" ? amt : 0;
   const dy = y != null ? Number(y) : direction === "up" ? -amt : direction === "down" || !direction ? amt : 0;
-
-  // 1) Multi-root DOM scroll (SPAs often don't move window.scrollY)
-  const domResult = await evaluateJson(
-    client,
-    `(() => {
-      const sel = ${JSON.stringify(selector || null)};
-      const dx = ${dx};
-      const dy = ${dy};
-      if (sel) {
-        const el = document.querySelector(sel);
-        if (!el) return JSON.stringify({ ok: false, error: "element not found: " + sel });
-        el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-        return JSON.stringify({ ok: true, mode: "intoView", selector: sel, moved: true });
-      }
-      function collectRoots() {
-        const list = [];
-        const push = (el) => { if (el && !list.includes(el)) list.push(el); };
-        push(document.scrollingElement);
-        push(document.documentElement);
-        push(document.body);
-        for (const el of document.querySelectorAll("div,main,section,article,aside")) {
-          try {
-            const st = getComputedStyle(el);
-            const oy = st.overflowY, ox = st.overflowX;
-            const can = /auto|scroll|overlay/.test(oy) || /auto|scroll|overlay/.test(ox);
-            const dy0 = el.scrollHeight - el.clientHeight;
-            const dx0 = el.scrollWidth - el.clientWidth;
-            if (can && (dy0 > 40 || dx0 > 40) && el.clientHeight > 80) list.push(el);
-          } catch (_) {}
-        }
-        return list;
-      }
-      const roots = collectRoots();
-      const attempts = [];
-      let moved = false;
-      for (const root of roots.slice(0, 25)) {
-        const beforeY = root.scrollTop;
-        const beforeX = root.scrollLeft;
-        try {
-          if (typeof root.scrollBy === "function") root.scrollBy({ left: dx, top: dy, behavior: "instant" });
-          else { root.scrollTop = beforeY + dy; root.scrollLeft = beforeX + dx; }
-        } catch (_) {
-          root.scrollTop = beforeY + dy;
-          root.scrollLeft = beforeX + dx;
-        }
-        const afterY = root.scrollTop;
-        const afterX = root.scrollLeft;
-        const did = afterY !== beforeY || afterX !== beforeX;
-        attempts.push({
-          root: root.tagName + (root.id ? "#" + root.id : ""),
-          beforeY, afterY, did,
-        });
-        if (did) {
-          moved = true;
-          return JSON.stringify({
-            ok: true, mode: "dom-root", moved: true, dx, dy,
-            scrollTopBefore: beforeY, scrollTopAfter: afterY,
-            root: root.tagName + (root.id ? "#" + root.id : ""),
-          });
-        }
-      }
-      window.scrollBy(dx, dy);
-      return JSON.stringify({
-        ok: true, mode: "window-fallback", moved: (window.scrollY || 0) !== 0, dx, dy,
-        scrollY: window.scrollY, attempts: attempts.slice(0, 8),
-      });
-    })()`,
-    session,
-  );
-
-  if (domResult?.moved) return assertOk(domResult, "scroll");
-
-  // 2) CDP mouse wheel (works when page uses non-scrollTop virtual lists / listeners)
-  try {
-    const vp = await evaluateJson(
-      client,
-      `(() => JSON.stringify({ w: window.innerWidth||800, h: window.innerHeight||600 }))()`,
-      session,
-    );
-    const cx = Math.floor((vp?.w || 800) / 2);
-    const cy = Math.floor((vp?.h || 600) / 2);
-    await cdp(
-      client,
-      "Input.dispatchMouseEvent",
-      {
-        type: "mouseWheel",
-        x: cx,
-        y: cy,
-        deltaX: dx,
-        deltaY: dy,
-        modifiers: 0,
-      },
-      session,
-    );
-    await sleep(80);
-    return {
-      ok: true,
-      mode: "cdp-wheel",
-      moved: true,
-      dx,
-      dy,
-      note: "DOM scrollTop did not change; used CDP mouseWheel",
-      dom: domResult,
-    };
-  } catch (err) {
-    if (domResult?.ok) return { ...domResult, moved: false, warning: "scroll may not have moved", cdpError: err.message };
-    throw new ToolError("Scroll failed on this page layout", {
-      code: "scroll_failed",
-      detail: { dom: domResult, cdp: err.message },
-      hint: "Try selector/@e scrollIntoView, or PageDown via wb_press_key. Some players intercept wheel.",
-    });
-  }
+  const result = await evaluateJson(client, `(() => {
+    const selector = ${JSON.stringify(container || null)};
+    const roots = selector ? [...document.querySelectorAll(selector)] : [document.scrollingElement];
+    if (roots.length !== 1 || !roots[0]) return JSON.stringify({ok:false, error:"Scroll container must match exactly one element"});
+    const root = roots[0];
+    const before = { x:root.scrollLeft, y:root.scrollTop };
+    root.scrollBy({left:${dx}, top:${dy}, behavior:"instant"});
+    const after = { x:root.scrollLeft, y:root.scrollTop };
+    return JSON.stringify({ok:true, moved:before.x!==after.x || before.y!==after.y, before, after, mode:"dom-scroll", verified:true, viewport:{w:innerWidth,h:innerHeight}});
+  })()`, session);
+  assertOk(result, "scroll");
+  if (result.moved || container) return result;
+  // Wheel fallback can drive virtual lists. Dispatch is not proof of movement.
+  await cdp(client, "Input.dispatchMouseEvent", {type:"mouseWheel", x:result.viewport.w/2, y:result.viewport.h/2, deltaX:dx, deltaY:dy}, session);
+  return {ok:true, mode:"cdp-wheel", moved:null, verified:false, outcome:"dispatched", dx, dy, dom:result};
 }
 
 // ── Click with optional new-tab follow ────────────────────────
 
-function sameSite(a, b) {
-  try {
-    const ha = new URL(a).hostname.replace(/^www\./, "");
-    const hb = new URL(b).hostname.replace(/^www\./, "");
-    return ha === hb;
-  } catch {
-    return false;
-  }
-}
-
-export async function clickSmart(client, selector, session, { followNewTab = true } = {}) {
-  const { allowBorrowActiveTab } = await import("./tool-profile.js");
-  let beforeIds = new Set();
-  let beforeById = new Map();
-  let beforeHref = null;
+export async function clickSmart(client, selector, session, { followNewTab = true, followTimeoutMs = 1500, timeoutMs = 10000, button = "left", inputMode = "auto" } = {}) {
+  let beforeTabs = [], sourceTabId, observationError;
   if (followNewTab) {
     try {
       const listed = unwrap(await client.command("list_tabs", {}, { session }));
-      const beforeTabs = listed?.tabs || listed?.data?.tabs || [];
-      beforeIds = new Set(beforeTabs.map((t) => t.tabId));
-      beforeById = new Map(beforeTabs.map((t) => [t.tabId, t.url]));
-    } catch {
-      /* still click */
-    }
-    try {
-      beforeHref = (
-        await evaluateJson(
-          client,
-          `(() => JSON.stringify({ href: location.href }))()`,
-          session,
-        )
-      )?.href;
-    } catch {
-      /* */
-    }
+      beforeTabs = listed?.tabs || [];
+      const page = await evaluateJson(client, 'JSON.stringify({href:location.href})', session);
+      const sources = beforeTabs.filter(t => t.url === page?.href);
+      if (sources.length === 1) sourceTabId = sources[0].tabId;
+    } catch (err) { observationError = err.message; }
   }
-
-  const clickResult = unwrap(await client.command("click", { selector }, { session }));
-
-  if (!followNewTab) {
-    return { ok: true, click: clickResult, followedNewTab: false };
-  }
-
-  // Fast path then short backoff (avoid fixed ~2s when nothing changed)
-  const waits = [150, 250, 400, 700];
-  let sawGrowth = false;
-  for (let i = 0; i < waits.length; i++) {
-    await sleep(waits[i]);
+  const click = await interact(client, "click", selector, { timeoutMs, button, inputMode }, session);
+  if (!followNewTab || sourceTabId == null) return { ...click, followedNewTab: false, observationError,
+    hint: sourceTabId == null && followNewTab ? "Source tab identity unavailable; inspect wb_list_tabs." : undefined };
+  const beforeIds = new Set(beforeTabs.map(t => t.tabId));
+  const deadline = Date.now() + followTimeoutMs;
+  let created = [];
+  while (Date.now() < deadline) {
+    await sleep(Math.min(100, Math.max(0, deadline - Date.now())));
     try {
-      const listed = unwrap(await client.command("list_tabs", {}, { session }));
-      const afterTabs = listed?.tabs || listed?.data?.tabs || [];
-      const created = afterTabs.filter((t) => t.tabId != null && !beforeIds.has(t.tabId));
-      if (created.length) sawGrowth = true;
-      const httpCreated = created.filter((t) => /^https?:/i.test(t.url || ""));
-      const target = httpCreated[httpCreated.length - 1] || created[created.length - 1];
-      if (target?.url && !/^about:|chrome:|edge:/i.test(target.url)) {
+      const listed = unwrap(await client.command("list_tabs", {}, { session, timeoutMs: Math.max(1, deadline - Date.now()) }));
+      created = (listed?.tabs || []).filter(t => !beforeIds.has(t.tabId));
+      const related = created.filter(t => t.openerTabId === sourceTabId && /^https?:/i.test(t.url || ""));
+      if (related.length === 1 && created.length === 1) {
         const { findTabSmart } = await import("./tab-actions.js");
-        const switched = await findTabSmart(client, { url: target.url, session });
-        return {
-          ok: true,
-          click: clickResult,
-          followedNewTab: true,
-          newTab: { tabId: target.tabId, url: target.url, title: target.title },
-          findTab: switched,
-        };
+        const selected = await findTabSmart(client, { tabId: related[0].tabId, session });
+        return { ...click, followedNewTab: true, newTab: related[0], selection: selected };
       }
-      // Same tabId but URL navigated
-      for (const t of afterTabs) {
-        const prev = beforeById.get(t.tabId);
-        if (prev && t.url && t.url !== prev && /^https?:/i.test(t.url)) {
-          const { findTabSmart } = await import("./tab-actions.js");
-          await findTabSmart(client, { url: t.url, session });
-          return {
-            ok: true,
-            click: clickResult,
-            followedNewTab: false,
-            navigatedSameTab: true,
-            url: t.url,
-          };
-        }
-      }
-      const now = await evaluateJson(
-        client,
-        `(() => JSON.stringify({ href: location.href }))()`,
-        session,
-      );
-      if (beforeHref && now?.href && now.href !== beforeHref) {
-        return {
-          ok: true,
-          click: clickResult,
-          followedNewTab: false,
-          navigatedSameTab: true,
-          url: now.href,
-        };
-      }
-      // Early exit if session tab set stable and URL unchanged after first couple polls
-      if (!sawGrowth && i >= 1 && beforeHref && now?.href === beforeHref) {
-        break;
-      }
-    } catch (err) {
-      if (i === waits.length - 1) {
-        return {
-          ok: true,
-          click: clickResult,
-          followedNewTab: false,
-          followError: err.message,
-          hint: "Click ok; use wb_list_tabs + wb_find_tab if a new tab opened.",
-        };
-      }
-    }
+    } catch (err) { observationError = err.message; break; }
   }
-
-  // Optional borrow of browser active tab (OFF by default — can steal focus from user tabs).
-  // Enable with WEBBRIDGE_CLICK_BORROW_ACTIVE=1 for sites that open tabs outside the session group.
-  if (allowBorrowActiveTab() && beforeHref) {
-    try {
-      const { findTabSmart } = await import("./tab-actions.js");
-      const borrowed = await findTabSmart(client, { active: true, session });
-      const url =
-        borrowed?.data?.url ||
-        borrowed?.url ||
-        borrowed?._meta?.resolvedUrl ||
-        null;
-      // Only if same-site as the page we clicked on (reduces accidental cross-site jumps)
-      if (url && sameSite(url, beforeHref) && url.split("?")[0] !== beforeHref.split("?")[0]) {
-        return {
-          ok: true,
-          click: clickResult,
-          followedNewTab: true,
-          borrowedActive: true,
-          url,
-          findTab: borrowed,
-        };
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-
-  return {
-    ok: true,
-    click: clickResult,
-    followedNewTab: false,
-    hint: sawGrowth
-      ? "Session gained a tab but switch failed; wb_list_tabs then wb_find_tab with full URL."
-      : "No session tab change detected. If the site opened a tab outside the agent group, set WEBBRIDGE_CLICK_BORROW_ACTIVE=1 or navigate by URL.",
-  };
+  return { ...click, followedNewTab: false, newTabCandidates: created, observationError,
+    hint: created.length ? "No unique opener relationship established; select explicitly with wb_find_tab." : "No related new tab observed within followTimeoutMs." };
 }
 
 // ── Wait ──────────────────────────────────────────────────────
 
-export async function waitFor(client, { text, selector, timeoutMs = 15000, intervalMs = 400 }, session) {
-  const deadline = Date.now() + Math.max(500, timeoutMs);
-  const interval = Math.max(100, intervalMs);
+export async function waitFor(client, { text, selector, url, state = "visible", timeoutMs = 15000, intervalMs = 400 }, session) {
+  const deadline = Date.now() + Math.max(1, timeoutMs);
+  const interval = Math.max(10, intervalMs);
   let last = null;
   const started = Date.now();
 
   while (Date.now() < deadline) {
     const code = `(() => {
-      const text = ${JSON.stringify(text || null)};
-      const selector = ${JSON.stringify(selector || null)};
+      const text = ${JSON.stringify(text ?? null)};
+      const selector = ${JSON.stringify(selector ?? null)};
+      const url = ${JSON.stringify(url ?? null)};
+      const state = ${JSON.stringify(state)};
+      let selectorOk = true;
       if (selector) {
-        const el = document.querySelector(selector);
-        if (el) return JSON.stringify({ ok: true, found: "selector", selector });
+        const elements = [...document.querySelectorAll(selector)];
+        const visible = el => { const r=el.getBoundingClientRect(); const s=getComputedStyle(el); return r.width>0 && r.height>0 && s.visibility!=="hidden" && s.visibility!=="collapse"; };
+        selectorOk = state === "hidden" ? elements.every(el => !visible(el)) : state === "detached" ? elements.length === 0 : elements.length === 1 && (state === "attached" || visible(elements[0])) && (state !== "enabled" || (!elements[0].matches(":disabled") && !elements[0].closest('[aria-disabled="true"],[inert]')));
       }
-      if (text) {
-        const body = document.body ? (document.body.innerText || "") : "";
-        if (body.includes(text)) return JSON.stringify({ ok: true, found: "text", text });
-      }
-      if (!text && !selector) {
-        if (document.readyState === "complete" || document.readyState === "interactive") {
-          return JSON.stringify({ ok: true, found: "ready", readyState: document.readyState });
-        }
-      }
-      const body = document.body ? (document.body.innerText || "").slice(0, 200) : "";
-      return JSON.stringify({
-        ok: false,
-        readyState: document.readyState,
-        title: document.title,
-        href: location.href,
-        bodyPreview: body,
-      });
+      const textOk = text == null || (document.body?.innerText || "").includes(text);
+      const urlOk = url == null || location.href === url;
+      const ready = text != null || selector || url != null || ["complete","interactive"].includes(document.readyState);
+      return JSON.stringify({ok:Boolean(selectorOk && textOk && urlOk && ready), href:location.href, readyState:document.readyState});
     })()`;
-    last = await evaluateJson(client, code, session);
+    const raw = unwrap(await client.command("evaluate", { code }, { session, timeoutMs: Math.max(1, deadline - Date.now()) }));
+    const value = raw?.value !== undefined ? raw.value : raw;
+    last = typeof value === "string" ? JSON.parse(value) : value;
     if (last && last.ok) {
       return { ...last, waitedMs: Date.now() - started };
     }
-    await sleep(interval);
+    await sleep(Math.min(interval, Math.max(0, deadline - Date.now())));
   }
 
   const httpish = /503|502|500|404|unavailable|error/i.test(
@@ -641,7 +328,7 @@ export async function goBack(client, session) {
       session,
     );
     if (after?.href && after.href !== before?.href) {
-      return { ok: true, action: "back", from: before?.href, href: after.href, readyState: after.readyState };
+      return { ok: true, action: "back", verified: true, outcome: "verified", from: before?.href, href: after.href, readyState: after.readyState };
     }
   }
   const finalHref = await evaluateJson(
@@ -652,6 +339,8 @@ export async function goBack(client, session) {
   return {
     ok: true,
     action: "back",
+    verified: false,
+    outcome: "dispatched",
     from: before?.href,
     href: finalHref?.href,
     readyState: finalHref?.readyState,
@@ -679,7 +368,7 @@ export async function goForward(client, session) {
       session,
     );
     if (after?.href && after.href !== before?.href) {
-      return { ok: true, action: "forward", from: before?.href, href: after.href, readyState: after.readyState };
+      return { ok: true, action: "forward", verified: true, outcome: "verified", from: before?.href, href: after.href, readyState: after.readyState };
     }
   }
   const finalHref = await evaluateJson(
@@ -690,6 +379,8 @@ export async function goForward(client, session) {
   return {
     ok: true,
     action: "forward",
+    verified: false,
+    outcome: "dispatched",
     from: before?.href,
     href: finalHref?.href,
     readyState: finalHref?.readyState,
@@ -702,9 +393,9 @@ export async function reload(client, { hard = false } = {}, session) {
     try {
       await cdp(client, "Page.reload", { ignoreCache: true }, session);
       await sleep(200);
-      return { ok: true, action: "reload", hard: true, mode: "cdp" };
-    } catch {
-      // fall through
+      return { ok: true, action: "reload", hard: true, mode: "cdp", verified: false, outcome: "dispatched" };
+    } catch (err) {
+      throw new ToolError("Reload outcome unknown", { code: "outcome_unknown", detail: err.message, hint: "Inspect the page before retrying; no second reload was sent." });
     }
   }
   // Fire-and-note: location.reload unloads the page; evaluate may abort
@@ -718,79 +409,17 @@ export async function reload(client, { hard = false } = {}, session) {
     // expected on navigation
   }
   await sleep(300);
-  return { ok: true, action: "reload", hard: Boolean(hard), mode: "location" };
+  return { ok: true, action: "reload", hard: Boolean(hard), mode: "location", verified: false, outcome: "dispatched" };
 }
 
 // ── Hover / dblclick ──────────────────────────────────────────
 
 export async function hoverSmart(client, selector, session) {
-  let meta = null;
-  if (selector.startsWith("@e")) {
-    const snap = unwrap(await client.command("snapshot", {}, { session }));
-    meta = findRefMeta(snap?.tree ?? snap, selector);
-    if (!meta) throw new Error(`ref ${selector} not found in snapshot; call wb_snapshot first`);
-  }
-
-  const code = `(() => {
-    const el = ${selector.startsWith("@e") ? domResolveScript(meta, selector) : `document.querySelector(${JSON.stringify(selector)})`};
-    if (!el) return JSON.stringify({ ok: false, error: "element not found for hover", selector: ${JSON.stringify(selector)}, name: ${JSON.stringify(meta?.name || "")}, role: ${JSON.stringify(meta?.role || "")} });
-    el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-    const r = el.getBoundingClientRect();
-    const x = r.left + r.width / 2;
-    const y = r.top + r.height / 2;
-    for (const type of ["mouseover", "mouseenter", "mousemove"]) {
-      el.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, view: window }));
-    }
-    return JSON.stringify({ ok: true, selector: ${JSON.stringify(selector)}, tag: el.tagName, x, y });
-  })()`;
-  return assertOk(await evaluateJson(client, code, session), "hover");
+  return interact(client, "hover", selector, {}, session);
 }
 
 export async function dblclick(client, selector, session) {
-  // Prefer real dblclick via evaluate after resolving; for @e use daemon click path for resolution then DOM dblclick
-  if (selector.startsWith("@e")) {
-    // Focus/resolve via single click is risky (navigation). Use snapshot meta + DOM dblclick.
-    const snap = unwrap(await client.command("snapshot", {}, { session }));
-    const meta = findRefMeta(snap?.tree ?? snap, selector);
-    if (!meta) throw new Error(`ref ${selector} not in snapshot`);
-    const code = `(() => {
-      const el = ${domResolveScript(meta, selector)};
-      if (!el) return JSON.stringify({ ok: false, error: "could not map ref for dblclick", ref: ${JSON.stringify(selector)} });
-      el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-      const r = el.getBoundingClientRect();
-      const x = r.left + r.width / 2;
-      const y = r.top + r.height / 2;
-      const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, detail: 2 };
-      el.dispatchEvent(new MouseEvent("mousedown", opts));
-      el.dispatchEvent(new MouseEvent("mouseup", opts));
-      el.dispatchEvent(new MouseEvent("click", { ...opts, detail: 1 }));
-      el.dispatchEvent(new MouseEvent("mousedown", opts));
-      el.dispatchEvent(new MouseEvent("mouseup", opts));
-      el.dispatchEvent(new MouseEvent("click", opts));
-      el.dispatchEvent(new MouseEvent("dblclick", opts));
-      return JSON.stringify({ ok: true, mode: "dom-dblclick", selector: ${JSON.stringify(selector)}, tag: el.tagName });
-    })()`;
-    return assertOk(await evaluateJson(client, code, session), "dblclick");
-  }
-
-  const code = `(() => {
-    const el = document.querySelector(${JSON.stringify(selector)});
-    if (!el) return JSON.stringify({ ok: false, error: "element not found", selector: ${JSON.stringify(selector)} });
-    el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-    const r = el.getBoundingClientRect();
-    const x = r.left + r.width / 2;
-    const y = r.top + r.height / 2;
-    const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, detail: 2 };
-    el.dispatchEvent(new MouseEvent("mousedown", opts));
-    el.dispatchEvent(new MouseEvent("mouseup", opts));
-    el.dispatchEvent(new MouseEvent("click", { ...opts, detail: 1 }));
-    el.dispatchEvent(new MouseEvent("mousedown", opts));
-    el.dispatchEvent(new MouseEvent("mouseup", opts));
-    el.dispatchEvent(new MouseEvent("click", opts));
-    el.dispatchEvent(new MouseEvent("dblclick", opts));
-    return JSON.stringify({ ok: true, mode: "dom-dblclick", selector: ${JSON.stringify(selector)}, tag: el.tagName });
-  })()`;
-  return assertOk(await evaluateJson(client, code, session), "dblclick");
+  return interact(client, "dblclick", selector, {}, session);
 }
 
 // ── Console capture ───────────────────────────────────────────
@@ -907,11 +536,12 @@ export async function fillForm(client, fields, session) {
   for (const field of fields) {
     try {
       const r = unwrap(
-        await client.command("fill", { selector: field.selector, value: String(field.value) }, { session }),
+        await interact(client, "fill", field.target || field.selector, { value: String(field.value) }, session),
       );
       results.push({ selector: field.selector, ok: true, result: r });
     } catch (err) {
       results.push({ selector: field.selector, ok: false, error: err.message || String(err) });
+      break;
     }
   }
   const failed = results.filter((r) => !r.ok);
@@ -920,7 +550,7 @@ export async function fillForm(client, fields, session) {
       `wb_fill_form: ${failed.length}/${results.length} fields failed`,
       {
         code: "fill_form_partial",
-        detail: { filled: results.length - failed.length, total: results.length, results },
+        detail: { filled: results.length - failed.length, total: fields.length, skipped: fields.length - results.length, results },
         hint: "Re-snapshot for @e refs; fill failed fields individually with wb_fill; check Vue/controlled inputs.",
       },
     );
